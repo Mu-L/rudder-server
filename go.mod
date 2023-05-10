@@ -74,8 +74,8 @@ require (
 	go.etcd.io/etcd/client/v3 v3.5.5
 	go.uber.org/automaxprocs v1.4.0
 	go.uber.org/zap v1.23.0
-	golang.org/x/net v0.0.0-20221002022538-bcab6841153b
-	golang.org/x/oauth2 v0.0.0-20220909003341-f21342109be1
+	golang.org/x/net v0.10.0
+	golang.org/x/oauth2 v0.8.0
 	golang.org/x/sync v0.0.0-20220923202941-7f9b1623fab7
 	google.golang.org/api v0.95.0
 	google.golang.org/grpc v1.50.0
