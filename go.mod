@@ -50,7 +50,7 @@ require (
 	github.com/minio/minio-go v6.0.14+incompatible
 	github.com/minio/minio-go/v6 v6.0.57
 	github.com/minio/minio-go/v7 v7.0.34
-	github.com/mkmik/multierror v0.3.0
+	github.com/mkmik/multierror v0.4.0
 	github.com/onsi/ginkgo/v2 v2.1.6
 	github.com/onsi/gomega v1.20.1
 	github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2
