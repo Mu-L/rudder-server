@@ -63,7 +63,7 @@ require (
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/viper v1.13.0
 	github.com/stretchr/testify v1.8.1
-	github.com/thoas/go-funk v0.9.1
+	github.com/thoas/go-funk v0.9.3
 	github.com/tidwall/gjson v1.14.3
 	github.com/tidwall/sjson v1.2.5
 	github.com/viney-shih/go-lock v1.1.2
