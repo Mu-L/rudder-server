@@ -54,7 +54,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.1.6
 	github.com/onsi/gomega v1.20.1
 	github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2
-	github.com/rs/cors v1.7.0
+	github.com/rs/cors v1.11.0
 	github.com/rudderlabs/analytics-go v3.3.1+incompatible
 	github.com/segmentio/kafka-go v0.4.35
 	github.com/snowflakedb/gosnowflake v1.6.13
