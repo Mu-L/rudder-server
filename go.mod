@@ -38,7 +38,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.15.2
 	github.com/golang/mock v1.6.0
 	github.com/gomodule/redigo v1.8.5
-	github.com/google/uuid v1.3.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.0
 	github.com/hashicorp/go-retryablehttp v0.7.0
 	github.com/hashicorp/yamux v0.0.0-20200609203250-aecfd211c9ce
@@ -49,7 +49,7 @@ require (
 	github.com/lib/pq v1.10.4
 	github.com/minio/minio-go v6.0.14+incompatible
 	github.com/minio/minio-go/v6 v6.0.57
-	github.com/minio/minio-go/v7 v7.0.34
+	github.com/minio/minio-go/v7 v7.0.76
 	github.com/mkmik/multierror v0.3.0
 	github.com/onsi/ginkgo/v2 v2.1.6
 	github.com/onsi/gomega v1.20.1
@@ -62,7 +62,7 @@ require (
 	github.com/spaolacci/murmur3 v1.1.0
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/viper v1.13.0
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.9.0
 	github.com/thoas/go-funk v0.9.1
 	github.com/tidwall/gjson v1.14.3
 	github.com/tidwall/sjson v1.2.5
@@ -74,7 +74,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.5.5
 	go.uber.org/automaxprocs v1.4.0
 	go.uber.org/zap v1.23.0
-	golang.org/x/net v0.0.0-20221002022538-bcab6841153b
+	golang.org/x/net v0.28.0
 	golang.org/x/oauth2 v0.0.0-20220909003341-f21342109be1
 	golang.org/x/sync v0.0.0-20220923202941-7f9b1623fab7
 	google.golang.org/api v0.95.0
@@ -121,11 +121,11 @@ require (
 	github.com/docker/docker v20.10.21+incompatible // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.4.0 // indirect
-	github.com/dustin/go-humanize v1.0.0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/form3tech-oss/jwt-go v3.2.5+incompatible // indirect
 	github.com/gabriel-vasile/mimetype v1.4.0 // indirect
 	github.com/garyburd/redigo v1.6.0 // indirect
-	github.com/go-ini/ini v1.63.2 // indirect
+	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-sql/civil v0.0.0-20190719163853-cb61b32ac6fe // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
@@ -142,8 +142,8 @@ require (
 	github.com/imdario/mergo v0.3.12 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
-	github.com/klauspost/compress v1.15.9 // indirect
-	github.com/klauspost/cpuid/v2 v2.1.0 // indirect
+	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
 	github.com/linkedin/goavro v2.1.0+incompatible
 	github.com/magiconair/properties v1.8.6 // indirect
 	github.com/mattn/go-ieproxy v0.0.1 // indirect
@@ -170,7 +170,7 @@ require (
 	github.com/prometheus/client_model v0.3.0
 	github.com/prometheus/common v0.37.0
 	github.com/rivo/uniseg v0.1.0 // indirect
-	github.com/rs/xid v1.4.0 // indirect
+	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/segmentio/backo-go v0.0.0-20160424052352-204274ad699c // indirect
 	github.com/sirupsen/logrus v1.9.0 // indirect
@@ -192,10 +192,10 @@ require (
 	go.opencensus.io v0.23.0 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
-	golang.org/x/crypto v0.0.0-20220926161630-eccd6366d1be // indirect
+	golang.org/x/crypto v0.26.0 // indirect
 	golang.org/x/exp v0.0.0-20221109205753-fc8884afc316
-	golang.org/x/sys v0.1.0 // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/sys v0.24.0 // indirect
+	golang.org/x/text v0.17.0 // indirect
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20220914142337-ca0e39ece12f
@@ -215,3 +215,5 @@ require (
 )
 
 require github.com/samber/lo v1.33.0
+
+require github.com/goccy/go-json v0.10.3 // indirect
