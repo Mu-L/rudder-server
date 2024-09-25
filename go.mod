@@ -58,7 +58,7 @@ require (
 	github.com/rudderlabs/analytics-go v3.3.1+incompatible
 	github.com/segmentio/kafka-go v0.4.35
 	github.com/snowflakedb/gosnowflake v1.6.13
-	github.com/sony/gobreaker v0.5.0
+	github.com/sony/gobreaker v1.0.0
 	github.com/spaolacci/murmur3 v1.1.0
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/viper v1.13.0
