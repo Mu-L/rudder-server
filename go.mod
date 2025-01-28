@@ -72,7 +72,7 @@ require (
 	github.com/zenizh/go-capturer v0.0.0-20211219060012-52ea6c8fed04
 	go.etcd.io/etcd/api/v3 v3.5.5
 	go.etcd.io/etcd/client/v3 v3.5.5
-	go.uber.org/automaxprocs v1.4.0
+	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/zap v1.23.0
 	golang.org/x/net v0.0.0-20221002022538-bcab6841153b
 	golang.org/x/oauth2 v0.0.0-20220909003341-f21342109be1
