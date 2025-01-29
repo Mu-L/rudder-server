@@ -4,15 +4,14 @@ import (
 	"context"
 	"testing"
 
-	gomock "github.com/golang/mock/gomock"
-	"github.com/rudderlabs/rudder-server/regulation-worker/internal/initialize"
+	"github.com/stretchr/testify/require"
+	gomock "go.uber.org/mock/gomock"
+
 	"github.com/rudderlabs/rudder-server/regulation-worker/internal/model"
 	"github.com/rudderlabs/rudder-server/regulation-worker/internal/service"
-	"github.com/stretchr/testify/require"
 )
 
 func TestJobSvc(t *testing.T) {
-	initialize.Init()
 	config := map[string]interface{}{
 		"bucketName":  "malani-deletefeature-testdata",
 		"prefix":      "regulation",
@@ -27,7 +26,8 @@ func TestJobSvc(t *testing.T) {
 		expectedStatus              model.JobStatus
 		updateStatusErrBefore       error
 		dest                        model.Destination
-		deleteJobStatus             model.JobStatus
+		deleteJobStatusByDeleter    model.JobStatus
+		finalDeleteJobStatus        model.JobStatus
 		deleteJobErr                error
 		updateStatusErrAfter        error
 		expectedFinalErr            error
@@ -43,8 +43,9 @@ func TestJobSvc(t *testing.T) {
 				ID:          1,
 				WorkspaceID: "1234",
 			},
-			expectedStatus:  model.JobStatusRunning,
-			deleteJobStatus: model.JobStatusComplete,
+			expectedStatus:           model.JobStatus{Status: model.JobStatusRunning},
+			deleteJobStatusByDeleter: model.JobStatus{Status: model.JobStatusComplete},
+			finalDeleteJobStatus:     model.JobStatus{Status: model.JobStatusComplete},
 			dest: model.Destination{
 				Config:        config,
 				DestinationID: "1111",
@@ -66,6 +67,22 @@ func TestJobSvc(t *testing.T) {
 			deleteJobCallCount:          0,
 			getDestDetailsCount:         0,
 		},
+		{
+			name: "regulation worker returns aborted status if failedAttempts >=5",
+			job: model.Job{
+				ID:             1,
+				WorkspaceID:    "1234",
+				FailedAttempts: 4,
+			},
+			getJobCallCount:             1,
+			updateStatusBeforeCallCount: 1,
+			updateStatusAfterCallCount:  1,
+			deleteJobCallCount:          1,
+			getDestDetailsCount:         1,
+			expectedStatus:              model.JobStatus{Status: model.JobStatusRunning},
+			deleteJobStatusByDeleter:    model.JobStatus{Status: model.JobStatusFailed},
+			finalDeleteJobStatus:        model.JobStatus{Status: model.JobStatusAborted},
+		},
 	}
 
 	ctx := context.Background()
@@ -79,13 +96,13 @@ func TestJobSvc(t *testing.T) {
 
 			jobID := tt.job.ID
 			mockAPIClient.EXPECT().UpdateStatus(ctx, tt.expectedStatus, jobID).Return(tt.updateStatusErrBefore).Times(tt.updateStatusBeforeCallCount)
-			mockAPIClient.EXPECT().UpdateStatus(ctx, tt.deleteJobStatus, jobID).Return(tt.updateStatusErrAfter).Times(tt.updateStatusAfterCallCount)
+			mockAPIClient.EXPECT().UpdateStatus(ctx, tt.finalDeleteJobStatus, jobID).Return(tt.updateStatusErrAfter).Times(tt.updateStatusAfterCallCount)
 
 			mockDeleter := service.NewMockdeleter(mockCtrl)
-			mockDeleter.EXPECT().Delete(ctx, tt.job, tt.dest).Return(tt.deleteJobStatus).Times(tt.deleteJobCallCount)
+			mockDeleter.EXPECT().Delete(ctx, tt.job, tt.dest).Return(tt.deleteJobStatusByDeleter).Times(tt.deleteJobCallCount)
 
 			mockDestDetail := service.NewMockdestDetail(mockCtrl)
-			mockDestDetail.EXPECT().GetDestDetails(ctx, tt.job.DestinationID).Return(tt.dest, nil).Times(tt.getDestDetailsCount)
+			mockDestDetail.EXPECT().GetDestDetails(tt.job.DestinationID).Return(tt.dest, nil).Times(tt.getDestDetailsCount)
 			svc := service.JobSvc{
 				API:        mockAPIClient,
 				Deleter:    mockDeleter,

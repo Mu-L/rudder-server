@@ -7,11 +7,13 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/service/personalizeevents"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/tidwall/gjson"
+
+	"github.com/rudderlabs/rudder-go-kit/awsutil"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 	"github.com/rudderlabs/rudder-server/utils/awsutils"
-	"github.com/rudderlabs/rudder-server/utils/logger"
-	"github.com/tidwall/gjson"
 )
 
 var pkgLogger logger.Logger
@@ -35,7 +37,7 @@ func NewProducer(destination *backendconfig.DestinationT, o common.Opts) (*Perso
 	if err != nil {
 		return nil, err
 	}
-	awsSession, err := awsutils.CreateSession(sessionConfig)
+	awsSession, err := awsutil.CreateSession(sessionConfig)
 	if err != nil {
 		return nil, err
 	}

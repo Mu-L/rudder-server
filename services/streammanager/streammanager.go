@@ -4,17 +4,21 @@ import (
 	"errors"
 	"fmt"
 
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/services/streammanager/bqstream"
 	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 	"github.com/rudderlabs/rudder-server/services/streammanager/eventbridge"
 	"github.com/rudderlabs/rudder-server/services/streammanager/firehose"
+	"github.com/rudderlabs/rudder-server/services/streammanager/googlecloudfunction"
 	"github.com/rudderlabs/rudder-server/services/streammanager/googlepubsub"
 	"github.com/rudderlabs/rudder-server/services/streammanager/googlesheets"
 	"github.com/rudderlabs/rudder-server/services/streammanager/kafka"
 	"github.com/rudderlabs/rudder-server/services/streammanager/kinesis"
 	"github.com/rudderlabs/rudder-server/services/streammanager/lambda"
 	"github.com/rudderlabs/rudder-server/services/streammanager/personalize"
+	"github.com/rudderlabs/rudder-server/services/streammanager/wunderkind"
 )
 
 // NewProducer delegates the call to the appropriate based on parameter destination for creating producer
@@ -45,6 +49,10 @@ func NewProducer(destination *backendconfig.DestinationT, opts common.Opts) (com
 		return bqstream.NewProducer(destination, opts)
 	case "LAMBDA":
 		return lambda.NewProducer(destination, opts)
+	case "GOOGLE_CLOUD_FUNCTION":
+		return googlecloudfunction.NewProducer(destination, opts)
+	case "WUNDERKIND":
+		return wunderkind.NewProducer(config.Default, logger.NewLogger().Child("streammanager"))
 	default:
 		return nil, fmt.Errorf("no provider configured for StreamManager") // 404, "No provider configured for StreamManager", ""
 	}

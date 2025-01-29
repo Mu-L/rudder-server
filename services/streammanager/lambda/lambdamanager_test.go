@@ -6,20 +6,23 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/mock/gomock"
+
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/lambda"
-	"github.com/golang/mock/gomock"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	mock_lambda "github.com/rudderlabs/rudder-server/mocks/services/streammanager/lambda"
-	mock_logger "github.com/rudderlabs/rudder-server/mocks/utils/logger"
-	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/rudderlabs/rudder-go-kit/logger/mock_logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
+	mock_lambda "github.com/rudderlabs/rudder-server/mocks/services/streammanager/lambda"
+	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 )
 
 var (
-	sampleMessage  = "sample payload"
-	sampleFunction = "sample function"
-	invocationType = "Event"
+	sampleMessage       = "sample payload"
+	sampleFunction      = "sample function"
+	sampleClientContext = "sample client context"
+	invocationType      = "Event"
 )
 
 func TestNewProducer(t *testing.T) {
@@ -81,26 +84,6 @@ func TestProduceWithInvalidData(t *testing.T) {
 	assert.Equal(t, 400, statusCode)
 	assert.Equal(t, "Failure", statusMsg)
 	assert.Contains(t, respMsg, "[Lambda] error :: Invalid payload")
-
-	// Destination Config not present
-	sampleEventJson, _ = json.Marshal(map[string]interface{}{
-		"payload": sampleMessage,
-	})
-	statusCode, statusMsg, respMsg = producer.Produce(sampleEventJson, map[string]string{})
-	assert.Equal(t, 400, statusCode)
-	assert.Equal(t, "Failure", statusMsg)
-	assert.Contains(t, respMsg, "[Lambda] error :: Invalid destination config")
-
-	// Invalid Destination Config
-	sampleDestConfig := map[string]interface{}{}
-	sampleEventJson, _ = json.Marshal(map[string]interface{}{
-		"payload":    sampleMessage,
-		"destConfig": "invalid dest config",
-	})
-	statusCode, statusMsg, respMsg = producer.Produce(sampleEventJson, sampleDestConfig)
-	assert.Equal(t, 400, statusCode)
-	assert.Equal(t, "Failure", statusMsg)
-	assert.Contains(t, respMsg, "[Lambda] error while unmarshalling jsonData")
 }
 
 func TestProduceWithServiceResponse(t *testing.T) {
@@ -110,26 +93,26 @@ func TestProduceWithServiceResponse(t *testing.T) {
 	mockLogger := mock_logger.NewMockLogger(ctrl)
 	pkgLogger = mockLogger
 
-	sampleDestConfig := map[string]interface{}{
-		"Lambda":         sampleFunction,
-		"InvocationType": invocationType,
-	}
-
 	sampleEventJson, _ := json.Marshal(map[string]interface{}{
-		"payload":    sampleMessage,
-		"destConfig": sampleDestConfig,
+		"payload": sampleMessage,
 	})
+
+	destConfig := map[string]string{
+		"lambda":        sampleFunction,
+		"clientContext": sampleClientContext,
+	}
 
 	var sampleInput lambda.InvokeInput
 	sampleInput.SetFunctionName(sampleFunction)
 	sampleInput.SetPayload([]byte(sampleMessage))
 	sampleInput.SetInvocationType(invocationType)
+	sampleInput.SetClientContext(sampleClientContext)
 
 	mockClient.
 		EXPECT().
 		Invoke(&sampleInput).
 		Return(&lambda.InvokeOutput{}, nil)
-	statusCode, statusMsg, respMsg := producer.Produce(sampleEventJson, map[string]string{})
+	statusCode, statusMsg, respMsg := producer.Produce(sampleEventJson, destConfig)
 	assert.Equal(t, 200, statusCode)
 	assert.Equal(t, "Success", statusMsg)
 	assert.NotEmpty(t, respMsg)
@@ -141,7 +124,7 @@ func TestProduceWithServiceResponse(t *testing.T) {
 		Invoke(&sampleInput).
 		Return(nil, errors.New(errorCode))
 	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
-	statusCode, statusMsg, respMsg = producer.Produce(sampleEventJson, map[string]string{})
+	statusCode, statusMsg, respMsg = producer.Produce(sampleEventJson, destConfig)
 	assert.Equal(t, 500, statusCode)
 	assert.Equal(t, "Failure", statusMsg)
 	assert.NotEmpty(t, respMsg)
@@ -154,7 +137,7 @@ func TestProduceWithServiceResponse(t *testing.T) {
 			awserr.New(errorCode, errorCode, errors.New(errorCode)), 400, "request-id",
 		))
 	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(1)
-	statusCode, statusMsg, respMsg = producer.Produce(sampleEventJson, map[string]string{})
+	statusCode, statusMsg, respMsg = producer.Produce(sampleEventJson, destConfig)
 	assert.Equal(t, 400, statusCode)
 	assert.Equal(t, errorCode, statusMsg)
 	assert.NotEmpty(t, respMsg)

@@ -11,13 +11,14 @@ import (
 
 	"cloud.google.com/go/bigquery"
 
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	"github.com/rudderlabs/rudder-server/services/streammanager/common"
-	"github.com/rudderlabs/rudder-server/utils/googleutils"
-	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/tidwall/gjson"
 	gbq "google.golang.org/api/bigquery/v2"
 	"google.golang.org/api/option"
+
+	"github.com/rudderlabs/rudder-go-kit/googleutil"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
+	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 )
 
 type Config struct {
@@ -87,9 +88,9 @@ func NewProducer(destination *backendconfig.DestinationT, o common.Opts) (*BQStr
 			gbq.BigqueryInsertdataScope,
 		}...),
 	}
-	if !googleutils.ShouldSkipCredentialsInit(config.Credentials) {
+	if !googleutil.ShouldSkipCredentialsInit(config.Credentials) {
 		confCreds := []byte(config.Credentials)
-		if err = googleutils.CompatibleGoogleCredentialsJSON(confCreds); err != nil {
+		if err = googleutil.CompatibleGoogleCredentialsJSON(confCreds); err != nil {
 			return nil, createErr(err, "incompatible credentials")
 		}
 		opts = append(opts, option.WithCredentialsJSON(confCreds))
@@ -155,5 +156,5 @@ func (producer *BQStreamProducer) Close() error {
 func createErr(err error, msg string) error {
 	fmtMsg := fmt.Errorf("[BQStream] error :: %v:: %w", msg, err).Error()
 	pkgLogger.Errorf(fmtMsg)
-	return fmt.Errorf(fmtMsg)
+	return errors.New(fmtMsg)
 }

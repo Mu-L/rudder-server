@@ -6,19 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/sony/gobreaker"
 
-	"github.com/rudderlabs/rudder-server/config"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/rruntime"
 	"github.com/rudderlabs/rudder-server/services/kvstoremanager"
 	"github.com/rudderlabs/rudder-server/services/streammanager"
 	"github.com/rudderlabs/rudder-server/services/streammanager/common"
-	"github.com/rudderlabs/rudder-server/utils/logger"
-	"github.com/rudderlabs/rudder-server/utils/misc"
 )
 
 const (
@@ -76,10 +76,10 @@ func Init() {
 }
 
 func loadConfig() {
-	ObjectStreamDestinations = []string{"KINESIS", "KAFKA", "AZURE_EVENT_HUB", "FIREHOSE", "EVENTBRIDGE", "GOOGLEPUBSUB", "CONFLUENT_CLOUD", "PERSONALIZE", "GOOGLESHEETS", "BQSTREAM", "LAMBDA"}
+	ObjectStreamDestinations = []string{"KINESIS", "KAFKA", "AZURE_EVENT_HUB", "FIREHOSE", "EVENTBRIDGE", "GOOGLEPUBSUB", "CONFLUENT_CLOUD", "PERSONALIZE", "GOOGLESHEETS", "BQSTREAM", "LAMBDA", "GOOGLE_CLOUD_FUNCTION", "WUNDERKIND"}
 	KVStoreDestinations = []string{"REDIS"}
 	Destinations = append(ObjectStreamDestinations, KVStoreDestinations...)
-	config.RegisterBoolConfigVariable(false, &disableEgress, false, "disableEgress")
+	disableEgress = config.GetBoolVar(false, "disableEgress")
 }
 
 // newClient delegates the call to the appropriate manager
@@ -131,9 +131,21 @@ func (customManager *CustomManagerT) send(jsonData json.RawMessage, client inter
 		streamProducer, _ := client.(common.StreamProducer)
 		statusCode, _, respBody = streamProducer.Produce(jsonData, config)
 	case KV:
+		var err error
 		kvManager, _ := client.(kvstoremanager.KVStoreManager)
-		key, fields := kvstoremanager.EventToKeyValue(jsonData)
-		err := kvManager.HMSet(key, fields)
+
+		switch {
+		case kvManager.ShouldSendDataAsJSON(config):
+			_, err = kvManager.SendDataAsJSON(jsonData, config)
+		case kvstoremanager.IsHSETCompatibleEvent(jsonData):
+			// if the event supports HSET operation then use HSET
+			hash, key, value := kvstoremanager.ExtractHashKeyValueFromEvent(jsonData)
+			err = kvManager.HSet(hash, key, value)
+		default:
+			key, fields := kvstoremanager.EventToKeyValue(jsonData)
+			err = kvManager.HMSet(key, fields)
+		}
+
 		statusCode = kvManager.StatusCode(err)
 		if err != nil {
 			respBody = err.Error()
@@ -285,10 +297,10 @@ type Opts struct {
 
 // New returns CustomdestinationManager
 func New(destType string, o Opts) DestinationManager {
-	if misc.Contains(Destinations, destType) {
+	if slices.Contains(Destinations, destType) {
 
 		managerType := STREAM
-		if misc.Contains(KVStoreDestinations, destType) {
+		if slices.Contains(KVStoreDestinations, destType) {
 			managerType = KV
 		}
 
@@ -329,7 +341,7 @@ func (customManager *CustomManagerT) backendConfigSubscriber() {
 		for _, wConfig := range config {
 			for _, source := range wConfig.Sources {
 				for _, destination := range source.Destinations {
-					if destination.DestinationDefinition.Name == customManager.destType {
+					if destination.DestinationDefinition.Name == customManager.destType && destination.Enabled {
 						err := customManager.onNewDestination(destination)
 						if err != nil {
 							pkgLogger.Errorf(

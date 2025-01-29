@@ -1,8 +1,10 @@
-//go:generate mockgen -destination=../mocks/router/mock_network.go -package mock_network github.com/rudderlabs/rudder-server/router NetHandleI
+//go:generate mockgen -destination=../mocks/router/mock_network.go -package mock_network github.com/rudderlabs/rudder-server/router NetHandle
 
 package router
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -15,27 +17,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-server/processor/integrations"
 	"github.com/rudderlabs/rudder-server/router/utils"
-	"github.com/rudderlabs/rudder-server/utils/logger"
+	"github.com/rudderlabs/rudder-server/utils/httputil"
 	"github.com/rudderlabs/rudder-server/utils/misc"
 	"github.com/rudderlabs/rudder-server/utils/sysUtils"
 )
 
-var contentTypeRegex *regexp.Regexp
+var contentTypeRegex = regexp.MustCompile(`^(text/[a-z0-9.-]+)|(application/([a-z0-9.-]+\+)?(json|xml))$`)
 
-func init() {
-	contentTypeRegex = regexp.MustCompile(`^(text/[a-z0-9.-]+)|(application/([a-z0-9.-]+\+)?(json|xml))$`)
+// netHandle is the wrapper holding private variables
+type netHandle struct {
+	disableEgress bool
+	httpClient    sysUtils.HTTPClientI
+	logger        logger.Logger
 }
 
-// NetHandleT is the wrapper holding private variables
-type NetHandleT struct {
-	httpClient sysUtils.HTTPClientI
-	logger     logger.Logger
-}
-
-// Network interface
-type NetHandleI interface {
+// NetHandle interface
+type NetHandle interface {
 	SendPost(ctx context.Context, structData integrations.PostParametersT) *utils.SendPostResponse
 }
 
@@ -59,8 +59,8 @@ func handleQueryParam(param interface{}) string {
 
 // SendPost takes the EventPayload of a transformed job, gets the necessary values from the payload and makes a call to destination to push the event to it
 // this returns the statusCode, status and response body from the response of the destination call
-func (network *NetHandleT) SendPost(ctx context.Context, structData integrations.PostParametersT) *utils.SendPostResponse {
-	if disableEgress {
+func (network *netHandle) SendPost(ctx context.Context, structData integrations.PostParametersT) *utils.SendPostResponse {
+	if network.disableEgress {
 		return &utils.SendPostResponse{
 			StatusCode:   200,
 			ResponseBody: []byte("200: outgoing disabled"),
@@ -92,6 +92,7 @@ func (network *NetHandleT) SendPost(ctx context.Context, structData integrations
 		}
 
 		var payload io.Reader
+		headers := map[string]string{"User-Agent": "RudderLabs"}
 		// support for JSON and FORM body type
 		if len(bodyValue) > 0 {
 			switch bodyFormat {
@@ -126,6 +127,34 @@ func (network *NetHandleT) SendPost(ctx context.Context, structData integrations
 					formValues.Set(key, fmt.Sprint(val)) // transformer ensures top level string values, still val.(string) would be restrictive
 				}
 				payload = strings.NewReader(formValues.Encode())
+			case "GZIP":
+				strValue, ok := bodyValue["payload"].(string)
+				if !ok {
+					return &utils.SendPostResponse{
+						StatusCode:   400,
+						ResponseBody: []byte("400 Unable to parse json list. Unexpected transformer response"),
+					}
+				}
+				var buf bytes.Buffer
+				zw := gzip.NewWriter(&buf)
+				defer func() { _ = zw.Close() }()
+
+				if _, err := zw.Write([]byte(strValue)); err != nil {
+					return &utils.SendPostResponse{
+						StatusCode:   400,
+						ResponseBody: []byte("400 Unable to compress data. Unexpected response"),
+					}
+				}
+
+				if err := zw.Close(); err != nil {
+					return &utils.SendPostResponse{
+						StatusCode:   400,
+						ResponseBody: []byte("400 Unable to flush compressed data. Unexpected response"),
+					}
+				}
+
+				headers["Content-Encoding"] = "gzip"
+				payload = &buf
 			default:
 				panic(fmt.Errorf("bodyFormat: %s is not supported", bodyFormat))
 			}
@@ -133,10 +162,10 @@ func (network *NetHandleT) SendPost(ctx context.Context, structData integrations
 
 		req, err := http.NewRequestWithContext(ctx, requestMethod, postInfo.URL, payload)
 		if err != nil {
-			network.logger.Error(fmt.Sprintf(`400 Unable to construct "%s" request for URL : "%s"`, requestMethod, postInfo.URL))
+			network.logger.Error(fmt.Sprintf(`400 Unable to construct %q request for URL : %q`, requestMethod, postInfo.URL))
 			return &utils.SendPostResponse{
 				StatusCode:   400,
-				ResponseBody: []byte(fmt.Sprintf(`400 Unable to construct "%s" request for URL : "%s"`, requestMethod, postInfo.URL)),
+				ResponseBody: []byte(fmt.Sprintf(`400 Unable to construct %q request for URL : %q`, requestMethod, postInfo.URL)),
 			}
 		}
 
@@ -144,10 +173,7 @@ func (network *NetHandleT) SendPost(ctx context.Context, structData integrations
 		// support of array type in params is handled if the
 		// response from transformers are "," separated
 		queryParams := req.URL.Query()
-		for key, val := range requestQueryParams { // list := strings.Split(valString, ",")
-			// for _, listItem := range list {
-			// 	queryParams.Add(key, fmt.Sprint(listItem))
-			// }
+		for key, val := range requestQueryParams {
 			formattedVal := handleQueryParam(val)
 			queryParams.Add(key, formattedVal)
 		}
@@ -158,23 +184,25 @@ func (network *NetHandleT) SendPost(ctx context.Context, structData integrations
 			req.Header.Add(key, val.(string))
 		}
 
-		req.Header.Add("User-Agent", "RudderLabs")
+		for key, val := range headers {
+			req.Header.Add(key, val)
+		}
 
 		resp, err := client.Do(req)
 		if err != nil {
 			return &utils.SendPostResponse{
 				StatusCode:   http.StatusGatewayTimeout,
-				ResponseBody: []byte(fmt.Sprintf(`504 Unable to make "%s" request for URL : "%s". Error: %s`, requestMethod, postInfo.URL, err.Error())),
+				ResponseBody: []byte(fmt.Sprintf(`504 Unable to make %q request for URL : %q. Error: %v`, requestMethod, postInfo.URL, err)),
 			}
 		}
 
-		defer func() { _ = resp.Body.Close() }()
+		defer func() { httputil.CloseResponse(resp) }()
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return &utils.SendPostResponse{
 				StatusCode:   resp.StatusCode,
-				ResponseBody: []byte(fmt.Sprintf(`Failed to read response body for request for URL : "%s". Error: %s`, postInfo.URL, err.Error())),
+				ResponseBody: []byte(fmt.Sprintf(`Failed to read response body for request for URL : %q. Error: %v`, postInfo.URL, err)),
 			}
 		}
 		network.logger.Debug(postInfo.URL, " : ", req.Proto, " : ", resp.Proto, resp.ProtoMajor, resp.ProtoMinor, resp.ProtoAtLeast)
@@ -213,7 +241,7 @@ func (network *NetHandleT) SendPost(ctx context.Context, structData integrations
 }
 
 // Setup initializes the module
-func (network *NetHandleT) Setup(destID string, netClientTimeout time.Duration) {
+func (network *netHandle) Setup(destID string, netClientTimeout time.Duration) {
 	network.logger.Info("Network Handler Startup")
 	// Reference http://tleyden.github.io/blog/2016/11/21/tuning-the-go-http-client-library-for-load-testing
 	defaultRoundTripper := http.DefaultTransport

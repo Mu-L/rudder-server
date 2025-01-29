@@ -3,12 +3,13 @@ package processor
 import (
 	"testing"
 
-	"github.com/rudderlabs/rudder-server/processor/transformer"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/rudderlabs/rudder-server/processor/transformer"
 )
 
 func TestReportViolations(t *testing.T) {
-	eventsFromTransformerResponse := func(response *transformer.ResponseT) (events []transformer.TransformerResponseT) {
+	eventsFromTransformerResponse := func(response *transformer.Response) (events []transformer.TransformerResponse) {
 		events = append(events, response.Events...)
 		events = append(events, response.FailedEvents...)
 		return
@@ -20,10 +21,10 @@ func TestReportViolations(t *testing.T) {
 			trackingPlanVersion int
 		)
 
-		response := transformer.ResponseT{
-			Events: []transformer.TransformerResponseT{
+		response := transformer.Response{
+			Events: []transformer.TransformerResponse{
 				{
-					Metadata: transformer.MetadataT{
+					Metadata: transformer.Metadata{
 						MergedTpConfig: map[string]interface{}{
 							"propagateValidationErrors": "false",
 						},
@@ -33,9 +34,9 @@ func TestReportViolations(t *testing.T) {
 					},
 				},
 			},
-			FailedEvents: []transformer.TransformerResponseT{
+			FailedEvents: []transformer.TransformerResponse{
 				{
-					Metadata: transformer.MetadataT{
+					Metadata: transformer.Metadata{
 						MergedTpConfig: map[string]interface{}{
 							"propagateValidationErrors": "false",
 						},
@@ -57,19 +58,36 @@ func TestReportViolations(t *testing.T) {
 		}
 	})
 
-	t.Run("Propagate validation errors", func(t *testing.T) {
-		response := transformer.ResponseT{
-			Events: []transformer.TransformerResponseT{
+	t.Run("Not propagating validation errors when context is not map", func(t *testing.T) {
+		var (
+			trackingPlanId      string
+			trackingPlanVersion int
+		)
+
+		response := transformer.Response{
+			Events: []transformer.TransformerResponse{
 				{
-					Metadata: transformer.MetadataT{
+					Metadata: transformer.Metadata{
+						MergedTpConfig: map[string]interface{}{
+							"propagateValidationErrors": "false",
+						},
+					},
+					Output: map[string]interface{}{
+						"context": "some context",
+					},
+				},
+			},
+			FailedEvents: []transformer.TransformerResponse{
+				{
+					Metadata: transformer.Metadata{
 						MergedTpConfig: map[string]interface{}{
 							"propagateValidationErrors": "true",
 						},
 					},
 					Output: map[string]interface{}{
-						"context": map[string]interface{}{},
+						"context": 1234,
 					},
-					ValidationErrors: []transformer.ValidationErrorT{
+					ValidationErrors: []transformer.ValidationError{
 						{
 							Type: "Datatype-Mismatch",
 							Meta: map[string]string{
@@ -81,9 +99,20 @@ func TestReportViolations(t *testing.T) {
 					},
 				},
 			},
-			FailedEvents: []transformer.TransformerResponseT{
+		}
+
+		enhanceWithViolation(response, trackingPlanId, trackingPlanVersion)
+		for _, event := range eventsFromTransformerResponse(&response) {
+			_, castOk := event.Output["context"].(map[string]interface{})
+			assert.False(t, castOk)
+		}
+	})
+
+	t.Run("Propagate validation errors", func(t *testing.T) {
+		response := transformer.Response{
+			Events: []transformer.TransformerResponse{
 				{
-					Metadata: transformer.MetadataT{
+					Metadata: transformer.Metadata{
 						MergedTpConfig: map[string]interface{}{
 							"propagateValidationErrors": "true",
 						},
@@ -91,7 +120,67 @@ func TestReportViolations(t *testing.T) {
 					Output: map[string]interface{}{
 						"context": map[string]interface{}{},
 					},
-					ValidationErrors: []transformer.ValidationErrorT{
+					ValidationErrors: []transformer.ValidationError{
+						{
+							Type: "Datatype-Mismatch",
+							Meta: map[string]string{
+								"schemaPath":  "#/properties/properties/properties/price/type",
+								"instacePath": "/properties/price",
+							},
+							Message: "must be number",
+						},
+					},
+				},
+				{
+					Metadata: transformer.Metadata{
+						MergedTpConfig: map[string]interface{}{
+							"propagateValidationErrors": "true",
+						},
+					},
+					Output: map[string]interface{}{
+						"context": nil,
+					},
+					ValidationErrors: []transformer.ValidationError{
+						{
+							Type: "Datatype-Mismatch",
+							Meta: map[string]string{
+								"schemaPath":  "#/properties/properties/properties/price/type",
+								"instacePath": "/properties/price",
+							},
+							Message: "must be number",
+						},
+					},
+				},
+			},
+			FailedEvents: []transformer.TransformerResponse{
+				{
+					Metadata: transformer.Metadata{
+						MergedTpConfig: map[string]interface{}{
+							"propagateValidationErrors": "true",
+						},
+					},
+					Output: map[string]interface{}{
+						"context": map[string]interface{}{},
+					},
+					ValidationErrors: []transformer.ValidationError{
+						{
+							Type: "Datatype-Mismatch",
+							Meta: map[string]string{
+								"schemaPath":  "#/properties/properties/properties/price/type",
+								"instacePath": "/properties/price",
+							},
+							Message: "must be number",
+						},
+					},
+				},
+				{
+					Metadata: transformer.Metadata{
+						MergedTpConfig: map[string]interface{}{
+							"propagateValidationErrors": "true",
+						},
+					},
+					Output: map[string]interface{}{},
+					ValidationErrors: []transformer.ValidationError{
 						{
 							Type: "Datatype-Mismatch",
 							Meta: map[string]string{

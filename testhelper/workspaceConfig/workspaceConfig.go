@@ -1,14 +1,14 @@
 package workspaceConfig
 
 import (
-	"html/template"
 	"os"
 	"testing"
+	"text/template"
 
 	"github.com/stretchr/testify/require"
 )
 
-func CreateTempFile(t *testing.T, templatePath string, values map[string]string) string {
+func CreateTempFile(t testing.TB, templatePath string, values map[string]any) string {
 	t.Helper()
 	tpl, err := template.ParseFiles(templatePath)
 	require.NoError(t, err)

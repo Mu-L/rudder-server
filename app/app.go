@@ -10,15 +10,16 @@ import (
 	"runtime/pprof"
 	"strings"
 
-	"github.com/rudderlabs/rudder-server/config"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-server/enterprise/trackedusers"
+
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	configenv "github.com/rudderlabs/rudder-server/enterprise/config-env"
-	"github.com/rudderlabs/rudder-server/enterprise/replay"
 	"github.com/rudderlabs/rudder-server/enterprise/reporting"
 	suppression "github.com/rudderlabs/rudder-server/enterprise/suppress-user"
 	"github.com/rudderlabs/rudder-server/jobsdb"
-	"github.com/rudderlabs/rudder-server/services/db"
-	"github.com/rudderlabs/rudder-server/utils/logger"
 )
 
 const (
@@ -74,18 +75,22 @@ func (a *app) initCPUProfiling() {
 }
 
 func (a *app) initFeatures() {
+	enterpriseLogger := logger.NewLogger().Child("enterprise")
 	a.features = &Features{
 		SuppressUser: &suppression.Factory{
 			EnterpriseToken: a.options.EnterpriseToken,
+			Log:             enterpriseLogger.Child("suppress-user"),
 		},
 		Reporting: &reporting.Factory{
 			EnterpriseToken: a.options.EnterpriseToken,
-		},
-		Replay: &replay.Factory{
-			EnterpriseToken: a.options.EnterpriseToken,
+			Log:             enterpriseLogger.Child("reporting"),
 		},
 		ConfigEnv: &configenv.Factory{
 			EnterpriseToken: a.options.EnterpriseToken,
+			Log:             enterpriseLogger.Child("config-env"),
+		},
+		TrackedUsers: &trackedusers.Factory{
+			Log: enterpriseLogger.Child("tracked-users"),
 		},
 	}
 }
@@ -133,14 +138,21 @@ func New(options *Options) App {
 // LivenessHandler is the http handler for the Kubernetes liveness probe
 func LivenessHandler(jobsDB jobsdb.JobsDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(getHealthVal(jobsDB)))
+		healthy, responsePayload := getHealthVal(jobsDB)
+		if !healthy {
+			http.Error(w, "Cannot connect to db", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(responsePayload))
 	}
 }
 
-func getHealthVal(jobsDB jobsdb.JobsDB) string {
+func getHealthVal(jobsDB jobsdb.JobsDB) (bool, string) {
 	dbService := "UP"
+	healthy := true
 	if jobsDB.Ping() != nil {
 		dbService = "DOWN"
+		healthy = false
 	}
 	enabledRouter := "TRUE"
 	if !config.GetBool("enableRouter", true) {
@@ -152,10 +164,10 @@ func getHealthVal(jobsDB jobsdb.JobsDB) string {
 	}
 
 	appTypeStr := strings.ToUpper(config.GetString("APP_TYPE", EMBEDDED))
-	return fmt.Sprintf(
-		`{"appType":"%s","server":"UP","db":"%s","acceptingEvents":"TRUE","routingEvents":"%s","mode":"%s",`+
+	return healthy, fmt.Sprintf(
+		`{"appType":"%s","server":"UP","db":"%s","acceptingEvents":"TRUE","routingEvents":"%s","mode":"NORMAL",`+
 			`"backendConfigMode":"%s","lastSync":"%s","lastRegulationSync":"%s"}`,
-		appTypeStr, dbService, enabledRouter, strings.ToUpper(db.CurrentMode),
+		appTypeStr, dbService, enabledRouter,
 		backendConfigMode, backendconfig.LastSync, backendconfig.LastRegulationSync,
 	)
 }

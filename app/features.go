@@ -5,14 +5,16 @@ package app
 import (
 	"context"
 
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	"github.com/rudderlabs/rudder-server/jobsdb"
+	"github.com/rudderlabs/rudder-server/enterprise/trackedusers"
+
+	"github.com/rudderlabs/rudder-go-kit/config"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/utils/types"
 )
 
 // SuppressUserFeature handles webhook event requests
 type SuppressUserFeature interface {
-	Setup(backendConfig backendconfig.BackendConfig) (types.UserSuppression, error)
+	Setup(ctx context.Context, backendConfig backendconfig.BackendConfig) (types.UserSuppression, error)
 }
 
 /*********************************
@@ -30,26 +32,17 @@ Reporting Feature
 
 // ReportingFeature handles reporting statuses / errors to reporting service
 type ReportingFeature interface {
-	Setup(backendConfig backendconfig.BackendConfig) types.ReportingI
-	GetReportingInstance() types.ReportingI
+	Setup(cxt context.Context, conf *config.Config, backendConfig backendconfig.BackendConfig) types.Reporting
 }
-
-/*********************************
-Replay Feature
-*********************************/
-
-// ReplayFeature handles inserting of failed jobs into respective gw/rt jobsdb
-type ReplayFeature interface {
-	Setup(ctx context.Context, replayDB, gwDB, routerDB, batchRouterDB *jobsdb.HandleT)
-}
-
-// ReplayFeatureSetup is a function that initializes a Replay feature
-type ReplayFeatureSetup func(App) ReplayFeature
 
 // Features contains optional implementations of Enterprise only features.
 type Features struct {
 	SuppressUser SuppressUserFeature
 	ConfigEnv    ConfigEnvFeature
 	Reporting    ReportingFeature
-	Replay       ReplayFeature
+	TrackedUsers TrackedUsersFeature
+}
+
+type TrackedUsersFeature interface {
+	Setup(c *config.Config) (trackedusers.UsersReporter, error)
 }

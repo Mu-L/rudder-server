@@ -2,85 +2,117 @@ package apphandlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
+	"time"
+
+	"github.com/rudderlabs/rudder-schemas/go/stream"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+
 	"github.com/rudderlabs/rudder-server/app"
 	"github.com/rudderlabs/rudder-server/app/cluster"
-	"github.com/rudderlabs/rudder-server/app/cluster/state"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/gateway"
+	gwThrottler "github.com/rudderlabs/rudder-server/gateway/throttler"
+	drain_config "github.com/rudderlabs/rudder-server/internal/drain-config"
 	"github.com/rudderlabs/rudder-server/jobsdb"
-	ratelimiter "github.com/rudderlabs/rudder-server/rate-limiter"
-	"github.com/rudderlabs/rudder-server/services/db"
 	sourcedebugger "github.com/rudderlabs/rudder-server/services/debugger/source"
-	fileuploader "github.com/rudderlabs/rudder-server/services/fileuploader"
+	"github.com/rudderlabs/rudder-server/services/transformer"
 	"github.com/rudderlabs/rudder-server/utils/misc"
 	"github.com/rudderlabs/rudder-server/utils/types/deployment"
-	"github.com/rudderlabs/rudder-server/utils/types/servermode"
 )
 
-// GatewayApp is the type for Gateway type implementation
-type GatewayApp struct {
-	App            app.App
-	VersionHandler func(w http.ResponseWriter, r *http.Request)
+// gatewayApp is the type for Gateway type implementation
+type gatewayApp struct {
+	setupDone      bool
+	app            app.App
+	versionHandler func(w http.ResponseWriter, r *http.Request)
+	log            logger.Logger
+	config         struct {
+		gatewayDSLimit config.ValueLoader[int]
+	}
 }
 
-func (*GatewayApp) GetAppType() string {
-	return fmt.Sprintf("rudder-server-%s", app.GATEWAY)
+func (a *gatewayApp) Setup() error {
+	a.config.gatewayDSLimit = config.GetReloadableIntVar(0, 1, "Gateway.jobsDB.dsLimit", "JobsDB.dsLimit")
+	if err := rudderCoreDBValidator(); err != nil {
+		return err
+	}
+	a.setupDone = true
+	return nil
 }
 
-func (gatewayApp *GatewayApp) StartRudderCore(ctx context.Context, options *app.Options) error {
-	pkgLogger.Info("Gateway starting")
-
-	rudderCoreDBValidator()
-	rudderCoreWorkSpaceTableSetup()
-	rudderCoreBaseSetup()
+func (a *gatewayApp) StartRudderCore(ctx context.Context, options *app.Options) error {
+	config := config.Default
+	statsFactory := stats.Default
+	if !a.setupDone {
+		return fmt.Errorf("gateway cannot start, database is not setup")
+	}
+	a.log.Info("Gateway starting")
 
 	deploymentType, err := deployment.GetFromEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get deployment type: %v", err)
 	}
 
-	pkgLogger.Infof("Configured deployment type: %q", deploymentType)
-	pkgLogger.Info("Clearing DB ", options.ClearDB)
+	a.log.Infof("Configured deployment type: %q", deploymentType)
+	a.log.Info("Clearing DB ", options.ClearDB)
 
-	sourcedebugger.Setup(backendconfig.DefaultBackendConfig)
+	sourceHandle, err := sourcedebugger.NewHandle(backendconfig.DefaultBackendConfig)
+	if err != nil {
+		return err
+	}
+	defer sourceHandle.Stop()
 
-	fileUploaderProvider := fileuploader.NewProvider(ctx, backendconfig.DefaultBackendConfig)
+	var dbPool *sql.DB
+	if config.GetBoolVar(true, "db.gateway.pool.shared", "db.pool.shared") {
+		dbPool, err = misc.NewDatabaseConnectionPool(ctx, config, statsFactory, "gateway-app")
+		if err != nil {
+			return err
+		}
+		defer dbPool.Close()
+	}
 
 	gatewayDB := jobsdb.NewForWrite(
 		"gw",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithDSLimit(&gatewayDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.gatewayDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Gateway.jobsDB.skipMaintenanceError", true)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer gatewayDB.Close()
+
 	if err := gatewayDB.Start(); err != nil {
 		return fmt.Errorf("could not start gatewayDB: %w", err)
 	}
 	defer gatewayDB.Stop()
 
+	errDB := jobsdb.NewForWrite(
+		"proc_error",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Gateway.jobsDB.skipMaintenanceError", true)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer errDB.Close()
+
+	if err := errDB.Start(); err != nil {
+		return fmt.Errorf("could not start errDB: %w", err)
+	}
+	defer errDB.Stop()
+
 	g, ctx := errgroup.WithContext(ctx)
 
-	var modeProvider cluster.ChangeEventProvider
-
-	switch deploymentType {
-	case deployment.MultiTenantType:
-		pkgLogger.Info("using ETCD Based Dynamic Cluster Manager")
-		modeProvider = state.NewETCDDynamicProvider()
-	case deployment.DedicatedType:
-		pkgLogger.Info("using Static Cluster Manager")
-		if enableProcessor && enableRouter {
-			modeProvider = state.NewStaticProvider(servermode.NormalMode)
-		} else {
-			modeProvider = state.NewStaticProvider(servermode.DegradedMode)
-		}
-	default:
-		return fmt.Errorf("unsupported deployment type: %q", deploymentType)
+	modeProvider, err := resolveModeProvider(a.log, deploymentType)
+	if err != nil {
+		return err
 	}
 
 	dm := cluster.Dynamic{
@@ -91,37 +123,49 @@ func (gatewayApp *GatewayApp) StartRudderCore(ctx context.Context, options *app.
 		return dm.Run(ctx)
 	})
 
-	var gw gateway.HandleT
-	var rateLimiter ratelimiter.HandleT
-
-	rateLimiter.SetUp()
-	gw.SetReadonlyDBs(&readonlyGatewayDB, &readonlyRouterDB, &readonlyBatchRouterDB)
-	rsourcesService, err := NewRsourcesService(deploymentType)
+	var gw gateway.Handle
+	rateLimiter, err := gwThrottler.New(statsFactory)
+	if err != nil {
+		return fmt.Errorf("failed to create rate limiter: %w", err)
+	}
+	rsourcesService, err := NewRsourcesService(deploymentType, false, statsFactory)
 	if err != nil {
 		return err
 	}
-	err = gw.Setup(
-		gatewayApp.App, backendconfig.DefaultBackendConfig, gatewayDB,
-		&rateLimiter, gatewayApp.VersionHandler, rsourcesService,
-	)
+	transformerFeaturesService := transformer.NewFeaturesService(ctx, config, transformer.FeaturesServiceOptions{
+		PollInterval:             config.GetDuration("Transformer.pollInterval", 10, time.Second),
+		TransformerURL:           config.GetString("DEST_TRANSFORM_URL", "http://localhost:9090"),
+		FeaturesRetryMaxAttempts: 10,
+	})
+	drainConfigManager, err := drain_config.NewDrainConfigManager(config, a.log.Child("drain-config"), statsFactory)
+	if err != nil {
+		a.log.Errorw("drain config manager setup failed while starting gateway", "error", err)
+	}
+
+	drainConfigHttpHandler := drain_config.ErrorResponder("unable to start drain config http handler")
+	if drainConfigManager != nil {
+		defer drainConfigManager.Stop()
+		drainConfigHttpHandler = drainConfigManager.DrainConfigHttpHandler()
+	}
+	streamMsgValidator := stream.NewMessageValidator()
+	err = gw.Setup(ctx, config, logger.NewLogger().Child("gateway"), statsFactory, a.app, backendconfig.DefaultBackendConfig,
+		gatewayDB, errDB, rateLimiter, a.versionHandler, rsourcesService, transformerFeaturesService, sourceHandle,
+		streamMsgValidator, gateway.WithInternalHttpHandlers(
+			map[string]http.Handler{
+				"/drain": drainConfigHttpHandler,
+			},
+		))
 	if err != nil {
 		return fmt.Errorf("failed to setup gateway: %w", err)
 	}
 	defer func() {
 		if err := gw.Shutdown(); err != nil {
-			pkgLogger.Warnf("Gateway shutdown error: %v", err)
+			a.log.Warnf("Gateway shutdown error: %v", err)
 		}
 	}()
 
 	g.Go(func() error {
-		return gw.StartAdminHandler(ctx)
-	})
-	g.Go(func() error {
 		return gw.StartWebHandler(ctx)
 	})
 	return g.Wait()
-}
-
-func (*GatewayApp) HandleRecovery(options *app.Options) {
-	db.HandleNullRecovery(options.NormalMode, options.DegradedMode, misc.AppStartTime, app.GATEWAY)
 }
