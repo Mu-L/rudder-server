@@ -6,18 +6,21 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/mock/gomock"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+
+	"github.com/rudderlabs/rudder-go-kit/logger/mock_logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	mock_kinesis "github.com/rudderlabs/rudder-server/mocks/services/streammanager/kinesis"
-	mock_logger "github.com/rudderlabs/rudder-server/mocks/utils/logger"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/rudderlabs/rudder-server/services/streammanager/common"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestKinesis(t *testing.T) {
@@ -51,12 +54,12 @@ func TestProduceWithInvalidClient(t *testing.T) {
 	assert.Equal(t, "Could not create producer for Kinesis", respMsg)
 }
 
-var validDestinationConfigUseMessageID Config = Config{
+var validDestinationConfigUseMessageID = Config{
 	Stream:       "stream",
 	UseMessageID: true,
 }
 
-var validDestinationConfigNotUseMessageID Config = Config{
+var validDestinationConfigNotUseMessageID = Config{
 	Stream:       "stream",
 	UseMessageID: false,
 }

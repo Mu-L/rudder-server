@@ -15,8 +15,9 @@ import (
 	"github.com/golang-migrate/migrate/v4/source"
 	bindata "github.com/golang-migrate/migrate/v4/source/go_bindata"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-server/sql/migrations"
-	"github.com/rudderlabs/rudder-server/utils/logger"
 )
 
 // Migrator is responsible for migrating postgres tables
@@ -31,6 +32,9 @@ type Migrator struct {
 	// Indicates if migration version should be force reset to latest on file in case of revert to lower version
 	// Eg. DB has v3 set in MigrationsTable but latest version in MigrationsDir is v2
 	ShouldForceSetLowerVersion bool
+
+	// Indicates if all migrations should be run ignoring the current version in MigrationsTable
+	RunAlways bool
 }
 
 var pkgLogger logger.Logger
@@ -146,9 +150,14 @@ func (m *Migrator) MigrateFromTemplates(templatesDir string, context interface{}
 	}
 
 	if m.ShouldForceSetLowerVersion {
-		err := m.forceSetLowerVersion(migration, sourceDriver, destinationDriver)
-		if err != nil {
+		if err := m.forceSetLowerVersion(migration, sourceDriver, destinationDriver); err != nil {
 			return err
+		}
+	}
+
+	if m.RunAlways {
+		if err := migration.Force(-1); err != nil {
+			return fmt.Errorf("force migration version to 0: %w", err)
 		}
 	}
 

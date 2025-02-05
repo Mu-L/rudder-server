@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rudderlabs/rudder-server/jobsdb/internal/lock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+
+	"github.com/rudderlabs/rudder-server/jobsdb/internal/lock"
 )
 
 func TestRLock(t *testing.T) {
@@ -37,6 +39,7 @@ func TestRLock(t *testing.T) {
 }
 
 func TestAsyncLock(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	locker := lock.NewLocker()
 
 	l, c, err := locker.AsyncLockWithCtx(context.Background())
@@ -69,6 +72,7 @@ func TestAsyncLock(t *testing.T) {
 }
 
 func TestAsyncLockTimeout(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	locker := lock.NewLocker()
 	locker.RLock()
 	defer locker.RUnlock()

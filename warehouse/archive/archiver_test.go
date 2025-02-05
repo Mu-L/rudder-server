@@ -1,32 +1,33 @@
-//go:build !warehouse_integration
-
 package archive_test
 
 import (
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
-	"github.com/minio/minio-go"
+	"github.com/ory/dockertest/v3"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/ory/dockertest/v3"
-	mock_stats "github.com/rudderlabs/rudder-server/mocks/services/stats"
-	"github.com/rudderlabs/rudder-server/services/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats/mock_stats"
+	"github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/minio"
+	"github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/postgres"
+
+	backendConfig "github.com/rudderlabs/rudder-server/backend-config"
 	migrator "github.com/rudderlabs/rudder-server/services/sql-migrator"
-	"github.com/rudderlabs/rudder-server/testhelper/destination"
-	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/warehouse/archive"
-	"github.com/rudderlabs/rudder-server/warehouse/model"
+	sqlmw "github.com/rudderlabs/rudder-server/warehouse/integrations/middleware/sqlquerywrapper"
+	"github.com/rudderlabs/rudder-server/warehouse/internal/model"
 	"github.com/rudderlabs/rudder-server/warehouse/multitenant"
 	warehouseutils "github.com/rudderlabs/rudder-server/warehouse/utils"
 )
@@ -64,8 +65,8 @@ func TestArchiver(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var (
 				prefix        = "test-prefix"
-				minioResource *destination.MINIOResource
-				pgResource    *destination.PostgresResource
+				minioResource *minio.Resource
+				pgResource    *postgres.Resource
 			)
 
 			pool, err := dockertest.NewPool("")
@@ -73,8 +74,10 @@ func TestArchiver(t *testing.T) {
 
 			g := errgroup.Group{}
 			g.Go(func() error {
-				pgResource, err = destination.SetupPostgres(pool, t)
+				pgResource, err = postgres.Setup(pool, t)
 				require.NoError(t, err)
+
+				t.Log("db:", pgResource.DBDsn)
 
 				err = (&migrator.Migrator{
 					Handle:          pgResource.DB,
@@ -91,8 +94,10 @@ func TestArchiver(t *testing.T) {
 				return nil
 			})
 			g.Go(func() error {
-				minioResource, err = destination.SetupMINIO(pool, t)
+				minioResource, err = minio.Setup(pool, t)
 				require.NoError(t, err)
+
+				t.Log("minio:", minioResource.Endpoint)
 
 				return nil
 			})
@@ -102,19 +107,22 @@ func TestArchiver(t *testing.T) {
 			t.Setenv("JOBS_BACKUP_BUCKET", minioResource.BucketName)
 			t.Setenv("JOBS_BACKUP_PREFIX", prefix)
 			t.Setenv("MINIO_ENDPOINT", minioResource.Endpoint)
-			t.Setenv("MINIO_ACCESS_KEY_ID", minioResource.AccessKey)
-			t.Setenv("MINIO_SECRET_ACCESS_KEY", minioResource.SecretKey)
+			t.Setenv("MINIO_ACCESS_KEY_ID", minioResource.AccessKeyID)
+			t.Setenv("MINIO_SECRET_ACCESS_KEY", minioResource.AccessKeySecret)
 			t.Setenv("MINIO_SSL", "false")
 			t.Setenv("RUDDER_TMPDIR", t.TempDir())
 			t.Setenv("RSERVER_WAREHOUSE_UPLOADS_ARCHIVAL_TIME_IN_DAYS", "0")
+			t.Setenv("RSERVER_WAREHOUSE_ARCHIVER_MAX_LIMIT", "1")
 
 			ctrl := gomock.NewController(t)
 			mockStats := mock_stats.NewMockStats(ctrl)
+			mockStats.EXPECT().NewStat(gomock.Any(), gomock.Any()).Times(1)
+
 			mockMeasurement := mock_stats.NewMockMeasurement(ctrl)
 
 			if tc.archived {
 				mockStats.EXPECT().NewTaggedStat(gomock.Any(), gomock.Any(), gomock.Any()).Times(4).Return(mockMeasurement)
-				mockMeasurement.EXPECT().Count(1).Times(4)
+				mockMeasurement.EXPECT().Increment().Times(4)
 			}
 
 			now := time.Now().Truncate(time.Second)
@@ -129,7 +137,7 @@ func TestArchiver(t *testing.T) {
 			require.NoError(t, err)
 
 			_, err = pgResource.DB.Exec(`
-				UPDATE wh_staging_files 
+				UPDATE wh_staging_files
 				SET
 					workspace_id = $1,
 					first_event_at = $2,
@@ -139,15 +147,21 @@ func TestArchiver(t *testing.T) {
 			`, tc.workspaceID, now)
 			require.NoError(t, err)
 
-			archiver := archive.Archiver{
-				DB:          pgResource.DB,
-				Stats:       mockStats,
-				Logger:      logger.NOP,
-				FileManager: filemanager.DefaultFileManagerFactory,
-				Multitenant: &multitenant.Manager{
-					DegradedWorkspaceIDs: tc.degradedWorkspaceIDs,
-				},
-			}
+			c := config.New()
+			c.Set("Warehouse.degradedWorkspaceIDs", tc.degradedWorkspaceIDs)
+
+			tenantManager := multitenant.New(c, backendConfig.DefaultBackendConfig)
+
+			db := sqlmw.New(pgResource.DB)
+
+			archiver := archive.New(
+				c,
+				logger.NOP,
+				mockStats,
+				db,
+				filemanager.New,
+				tenantManager,
+			)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -170,7 +184,12 @@ func TestArchiver(t *testing.T) {
 				}
 			}
 
-			contents := minioContents(t, minioResource, prefix)
+			minioContents, err := minioResource.Contents(ctx, prefix)
+			require.NoError(t, err)
+
+			contents := lo.SliceToMap(minioContents, func(item minio.File) (string, string) {
+				return item.Key, item.Content
+			})
 
 			var expectedContents map[string]string
 			jsonTestData(t, "testdata/storage.json", &expectedContents)
@@ -195,26 +214,64 @@ func TestArchiver(t *testing.T) {
 	}
 }
 
-func minioContents(t require.TestingT, dest *destination.MINIOResource, prefix string) map[string]string {
-	contents := make(map[string]string)
+func TestArchiver_Delete(t *testing.T) {
+	var pgResource *postgres.Resource
 
-	doneCh := make(chan struct{})
-	defer close(doneCh)
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pgResource, err = postgres.Setup(pool, t)
+	require.NoError(t, err)
 
-	for objInfo := range dest.Client.ListObjectsV2(dest.BucketName, prefix, true, nil) {
-		o, err := dest.Client.GetObject(dest.BucketName, objInfo.Key, minio.GetObjectOptions{})
-		require.NoError(t, err)
+	t.Log("db:", pgResource.DBDsn)
 
-		g, err := gzip.NewReader(o)
-		require.NoError(t, err)
+	err = (&migrator.Migrator{
+		Handle:          pgResource.DB,
+		MigrationsTable: "wh_schema_migrations",
+	}).Migrate("warehouse")
+	require.NoError(t, err)
 
-		b, err := io.ReadAll(g)
-		require.NoError(t, err)
+	sqlStatement, err := os.ReadFile("testdata/dump.sql")
+	require.NoError(t, err)
 
-		contents[objInfo.Key] = string(b)
-	}
+	_, err = pgResource.DB.Exec(string(sqlStatement))
+	require.NoError(t, err)
 
-	return contents
+	ctrl := gomock.NewController(t)
+	mockStats := mock_stats.NewMockStats(ctrl)
+	mockStats.EXPECT().NewStat(gomock.Any(), gomock.Any()).Times(1)
+
+	status := model.ExportedData
+	workspaceID := "1"
+	_, err = pgResource.DB.Exec(`
+				UPDATE wh_uploads SET workspace_id = $1, status = $2
+			`, workspaceID, status)
+	require.NoError(t, err)
+
+	c := config.New()
+	c.Set("Warehouse.uploadRetentionTimeInDays", 0)
+	tenantManager := multitenant.New(c, backendConfig.DefaultBackendConfig)
+
+	db := sqlmw.New(pgResource.DB)
+
+	archiver := archive.New(
+		c,
+		logger.NOP,
+		mockStats,
+		db,
+		filemanager.New,
+		tenantManager,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = archiver.Delete(ctx)
+	require.NoError(t, err)
+
+	var count int
+	err = pgResource.DB.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %q`, warehouseutils.WarehouseUploadsTable)).Scan(&count)
+	require.NoError(t, err)
+	require.Zero(t, count, "wh_uploads rows should be deleted")
 }
 
 func jsonTestData(t require.TestingT, file string, value any) {

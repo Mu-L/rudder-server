@@ -3,38 +3,35 @@ package client
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
-	proto "github.com/rudderlabs/rudder-server/proto/databricks"
-
 	"cloud.google.com/go/bigquery"
-	"github.com/rudderlabs/rudder-server/warehouse/deltalake/databricks"
-	warehouseutils "github.com/rudderlabs/rudder-server/warehouse/utils"
 	"google.golang.org/api/iterator"
+
+	warehouseutils "github.com/rudderlabs/rudder-server/warehouse/utils"
 )
 
 const (
 	SQLClient = "SQLClient"
 	BQClient  = "BigQueryClient"
-	DBClient  = "DBClient"
 )
 
 type Client struct {
-	SQL       *sql.DB
-	BQ        *bigquery.Client
-	DBHandleT *databricks.DBHandleT
-	Type      string
+	SQL  *sql.DB
+	BQ   *bigquery.Client
+	Type string
 }
 
 func (cl *Client) sqlQuery(statement string) (result warehouseutils.QueryResult, err error) {
 	rows, err := cl.SQL.Query(statement)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return result, nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result.Columns, err = rows.Columns()
 	if err != nil {
@@ -66,13 +63,14 @@ func (cl *Client) sqlQuery(statement string) (result warehouseutils.QueryResult,
 		}
 		result.Values = append(result.Values, stringRow)
 	}
+	err = rows.Err()
 	return result, err
 }
 
 func (cl *Client) bqQuery(statement string) (result warehouseutils.QueryResult, err error) {
 	query := cl.BQ.Query(statement)
-	context := context.Background()
-	it, err := query.Read(context)
+	ctx := context.Background()
+	it, err := query.Read(ctx)
 	if err != nil {
 		return
 	}
@@ -84,10 +82,10 @@ func (cl *Client) bqQuery(statement string) (result warehouseutils.QueryResult, 
 	for {
 		var row []bigquery.Value
 		err = it.Next(&row)
-		if err == iterator.Done {
-			break
-		}
 		if err != nil {
+			if errors.Is(err, iterator.Done) {
+				break
+			}
 			return
 		}
 		var stringRow []string
@@ -99,28 +97,10 @@ func (cl *Client) bqQuery(statement string) (result warehouseutils.QueryResult, 
 	return result, nil
 }
 
-func (cl *Client) dbQuery(statement string) (result warehouseutils.QueryResult, err error) {
-	executeResponse, err := cl.DBHandleT.Client.ExecuteQuery(cl.DBHandleT.Context, &proto.ExecuteQueryRequest{
-		Config:       cl.DBHandleT.CredConfig,
-		SqlStatement: statement,
-		Identifier:   cl.DBHandleT.CredIdentifier,
-	})
-	if err != nil {
-		return
-	}
-
-	for _, row := range executeResponse.GetRows() {
-		result.Values = append(result.Values, row.GetColumns())
-	}
-	return result, nil
-}
-
 func (cl *Client) Query(statement string) (result warehouseutils.QueryResult, err error) {
 	switch cl.Type {
 	case BQClient:
 		return cl.bqQuery(statement)
-	case DBClient:
-		return cl.dbQuery(statement)
 	default:
 		return cl.sqlQuery(statement)
 	}
@@ -129,10 +109,8 @@ func (cl *Client) Query(statement string) (result warehouseutils.QueryResult, er
 func (cl *Client) Close() {
 	switch cl.Type {
 	case BQClient:
-		cl.BQ.Close()
-	case DBClient:
-		cl.DBHandleT.Close()
+		_ = cl.BQ.Close()
 	default:
-		cl.SQL.Close()
+		_ = cl.SQL.Close()
 	}
 }

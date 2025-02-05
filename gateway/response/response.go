@@ -26,6 +26,8 @@ const (
 	InvalidWriteKey = "Invalid Write Key"
 	// InvalidJSON - Invalid JSON
 	InvalidJSON = "Invalid JSON"
+	// EmptyBatchPayload - Empty batch payload
+	EmptyBatchPayload = "Empty batch payload"
 	// InvalidWebhookSource - Source does not accept webhook events
 	InvalidWebhookSource = "Source does not accept webhook events"
 	// SourceTransformerResponseErrorReadFailed - Failed to read error from source transformer response
@@ -56,9 +58,25 @@ const (
 	ContextDeadlineExceeded = "context deadline exceeded"
 	// GatewayTimeout - Gateway timeout
 	GatewayTimeout = "Gateway timeout"
+	// ServiceUnavailable - Service unavailable
+	ServiceUnavailable = "Service unavailable"
+	// NoSourceIdInHeader - Failed to read source id from header
+	NoSourceIdInHeader = "Failed to read source id from header"
+	// InvalidSourceID - Invalid source id
+	InvalidSourceID = "Invalid source id"
+	// InvalidReplaySource - Invalid replay source
+	InvalidReplaySource = "Invalid replay source"
+	// InvalidDestinationID - Invalid destination id
+	InvalidDestinationID = "Invalid destination id"
+	// DestinationDisabled - Destination is disabled
+	DestinationDisabled = "Destination is disabled"
+	// NoDestinationIDInHeader - Failed to read destination id from header
+	NoDestinationIDInHeader = "Failed to read destination id from header"
 
 	transPixelResponse = "\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00\x21\xF9\x04" +
 		"\x01\x00\x00\x00\x00\x2C\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3B"
+
+	InvalidStreamMessage = "missing required fields stream in message"
 )
 
 var statusMap = map[string]status{
@@ -73,6 +91,15 @@ var statusMap = map[string]status{
 	InvalidWriteKey:         {message: InvalidWriteKey, code: http.StatusUnauthorized},
 	SourceDisabled:          {message: SourceDisabled, code: http.StatusNotFound},
 	InvalidJSON:             {message: InvalidJSON, code: http.StatusBadRequest},
+	EmptyBatchPayload:       {message: EmptyBatchPayload, code: http.StatusBadRequest},
+	NoSourceIdInHeader:      {message: NoSourceIdInHeader, code: http.StatusUnauthorized},
+	InvalidSourceID:         {message: InvalidSourceID, code: http.StatusUnauthorized},
+	InvalidReplaySource:     {message: InvalidReplaySource, code: http.StatusUnauthorized},
+	DestinationDisabled:     {message: DestinationDisabled, code: http.StatusNotFound},
+	InvalidDestinationID:    {message: InvalidDestinationID, code: http.StatusBadRequest},
+	NoDestinationIDInHeader: {message: NoDestinationIDInHeader, code: http.StatusBadRequest},
+	InvalidStreamMessage:    {message: InvalidStreamMessage, code: http.StatusBadRequest},
+
 	// webhook specific status
 	InvalidWebhookSource:                           {message: InvalidWebhookSource, code: http.StatusNotFound},
 	SourceTransformerFailed:                        {message: SourceTransformerFailed, code: http.StatusBadRequest},
@@ -87,6 +114,8 @@ var statusMap = map[string]status{
 	ErrorInParseMultiform:                          {message: ErrorInParseMultiform, code: http.StatusBadRequest},
 	NotRudderEvent:                                 {message: NotRudderEvent, code: http.StatusBadRequest},
 	ContextDeadlineExceeded:                        {message: GatewayTimeout, code: http.StatusGatewayTimeout},
+	GatewayTimeout:                                 {message: GatewayTimeout, code: http.StatusGatewayTimeout},
+	ServiceUnavailable:                             {message: ServiceUnavailable, code: http.StatusServiceUnavailable},
 }
 
 // status holds the gateway response status message and code

@@ -7,17 +7,16 @@ import (
 	"sync"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/rudder-server/app"
+	jsoniter "github.com/json-iterator/go"
+
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-server/app/cluster"
-	"github.com/rudderlabs/rudder-server/config"
-	"github.com/rudderlabs/rudder-server/utils/logger"
+	"github.com/rudderlabs/rudder-server/utils/misc"
 	"github.com/rudderlabs/rudder-server/utils/types/servermode"
-	"github.com/rudderlabs/rudder-server/utils/types/workspace"
 )
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
@@ -30,8 +29,7 @@ var (
 )
 
 const (
-	modeRequestKeyPattern        = `/%s/SERVER/%s/MODE`          // /<releaseName>/server/<serverIndex>/mode
-	workspacesRequestsKeyPattern = `/%s/SERVER/%s/%s/WORKSPACES` // /<releaseName>/server/<serverIndex>/<app_type>/workspaces
+	modeRequestKeyPattern = `/%s/SERVER/%s/MODE` // /<releaseName>/server/<serverIndex>/mode
 
 	defaultACKTimeout = 15 * time.Second
 )
@@ -57,27 +55,17 @@ type modeAckValue struct {
 	Status servermode.Mode `json:"status"`
 }
 
-type workspacesRequestsValue struct {
-	Workspaces string `json:"workspaces"` // comma separated workspaces
-	AckKey     string `json:"ack_key"`
-}
-
-type workspacesAckValue struct {
-	Status string `json:"status"`
-	Error  string `json:"error"`
-}
-
 func EnvETCDConfig() *ETCDConfig {
 	endpoints := strings.Split(config.GetString("ETCD_HOSTS", "127.0.0.1:2379"), `,`)
 	releaseName := config.GetReleaseName()
-	serverIndex := config.GetInstanceID()
+	serverIndex := misc.GetInstanceID()
 	var ackTimeout time.Duration
 
 	envConfigOnce.Do(func() {
-		config.RegisterDurationConfigVariable(15, &ackTimeout, false, time.Second, "etcd.ackTimeout")
-		config.RegisterDurationConfigVariable(30, &keepaliveTime, false, time.Second, "etcd.keepaliveTime")
-		config.RegisterDurationConfigVariable(10, &keepaliveTimeout, false, time.Second, "etcd.keepaliveTimeout")
-		config.RegisterDurationConfigVariable(20, &dialTimeout, false, time.Second, "etcd.dialTimeout")
+		ackTimeout = config.GetDurationVar(15, time.Second, "etcd.ackTimeout")
+		keepaliveTime = config.GetDurationVar(30, time.Second, "etcd.keepaliveTime")
+		keepaliveTimeout = config.GetDurationVar(10, time.Second, "etcd.keepaliveTimeout")
+		dialTimeout = config.GetDurationVar(20, time.Second, "etcd.dialTimeout")
 	})
 
 	return &ETCDConfig{
@@ -107,9 +95,6 @@ func (manager *ETCDManager) init() error {
 			DialTimeout:          manager.Config.dialTimeout,
 			DialKeepAliveTime:    manager.Config.dialKeepAliveTime,
 			DialKeepAliveTimeout: manager.Config.dialKeepAliveTimeout,
-			DialOptions: []grpc.DialOption{
-				grpc.WithBlock(), // block until the underlying connection is up
-			},
 		})
 		if err != nil {
 			endpoints := strings.Join(manager.Config.Endpoints, `,`)
@@ -220,100 +205,6 @@ func (manager *ETCDManager) ServerMode(ctx context.Context) <-chan servermode.Ch
 				case mvccpb.PUT:
 					select {
 					case resultChan <- manager.unmarshalMode(event.Kv.Value):
-					case <-ctx.Done():
-					}
-				default:
-					manager.logger.Warnf("unknown event type %s", event.Type)
-				}
-			}
-		}
-		close(resultChan)
-	}()
-
-	return resultChan
-}
-
-func errChWorkspacesRequest(err error) <-chan workspace.ChangeEvent {
-	ch := make(chan workspace.ChangeEvent, 1)
-	ch <- workspace.ChangeEventError(err)
-	close(ch)
-	return ch
-}
-
-func (manager *ETCDManager) unmarshalWorkspace(raw []byte) workspace.ChangeEvent {
-	var req workspacesRequestsValue
-	err := json.Unmarshal(raw, &req)
-	if err != nil {
-		return workspace.ChangeEventError(err)
-	}
-
-	return workspace.NewWorkspacesRequest(
-		strings.Split(req.Workspaces, ","),
-		func(ctx context.Context, ackErr error) (err error) {
-			ctx, cancel := context.WithTimeout(ctx, manager.ackTimeout)
-			defer cancel()
-
-			var ackValue string
-			if ackErr != nil {
-				ackValue, err = json.MarshalToString(workspacesAckValue{
-					Status: "ERROR",
-					Error:  ackErr.Error(),
-				})
-			} else {
-				ackValue, err = json.MarshalToString(workspacesAckValue{
-					Status: "RELOADED",
-				})
-			}
-			if err != nil {
-				return fmt.Errorf("marshal ack value: %w", err)
-			}
-			manager.logger.Infof("Workspace ID Change Acknowledgement (error: %v) Key: %s", ackErr != nil, req.AckKey)
-			_, err = manager.Client.Put(ctx, req.AckKey, ackValue)
-			if err != nil {
-				manager.logger.Errorf(
-					"Failed to acknowledge workspace ID change (error: %v) for key: %s", ackErr != nil, req.AckKey,
-				)
-			}
-			return err
-		},
-	)
-}
-
-func (manager *ETCDManager) WorkspaceIDs(ctx context.Context) <-chan workspace.ChangeEvent {
-	if err := manager.init(); err != nil {
-		return errChWorkspacesRequest(err)
-	}
-
-	appTypeStr := strings.ToUpper(config.GetString("APP_TYPE", app.PROCESSOR))
-	modeRequestKey := fmt.Sprintf(workspacesRequestsKeyPattern, manager.Config.ReleaseName, manager.Config.ServerIndex, appTypeStr)
-	manager.logger.Infof("Workspace ID Lookup Key: %s", modeRequestKey)
-
-	resultChan := make(chan workspace.ChangeEvent, 1)
-	resp, err := manager.Client.Get(ctx, modeRequestKey)
-	if err != nil {
-		return errChWorkspacesRequest(err)
-	}
-
-	revision := int64(0)
-	if len(resp.Kvs) != 0 {
-		resultChan <- manager.unmarshalWorkspace(resp.Kvs[0].Value)
-		revision = resp.Header.Revision + 1
-	}
-
-	etcdWatchChan := manager.Client.Watch(ctx, modeRequestKey, clientv3.WithRev(revision))
-
-	go func() {
-		for watchResp := range etcdWatchChan {
-			if watchResp.Err() != nil {
-				resultChan <- workspace.ChangeEventError(watchResp.Err())
-				continue
-			}
-
-			for _, event := range watchResp.Events {
-				switch event.Type {
-				case mvccpb.PUT:
-					select {
-					case resultChan <- manager.unmarshalWorkspace(event.Kv.Value):
 					case <-ctx.Done():
 					}
 				default:

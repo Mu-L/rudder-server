@@ -6,16 +6,18 @@ import (
 	"testing"
 	"time"
 
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-go-kit/logger/mock_logger"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	mock_eventbridge "github.com/rudderlabs/rudder-server/mocks/services/streammanager/eventbridge"
-	mock_logger "github.com/rudderlabs/rudder-server/mocks/utils/logger"
+
+	"go.uber.org/mock/gomock"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/eventbridge"
-	"github.com/golang/mock/gomock"
-	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 )
 
 func TestNewProducer(t *testing.T) {

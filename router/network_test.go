@@ -2,17 +2,22 @@ package router
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"testing"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	mocksSysUtils "github.com/rudderlabs/rudder-server/mocks/utils/sysUtils"
 	"github.com/rudderlabs/rudder-server/processor/integrations"
-	"github.com/rudderlabs/rudder-server/utils/logger"
 )
 
 type networkContext struct {
@@ -28,6 +33,65 @@ func (c *networkContext) Setup() {
 
 func (c *networkContext) Finish() {
 	c.mockCtrl.Finish()
+}
+
+func TestSendPostWithGzipData(t *testing.T) {
+	t.Run("should send Gzip data when payload is valid", func(r *testing.T) {
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Content-Encoding") != "gzip" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			body, err := gzip.NewReader(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			defer body.Close()
+			buf := new(bytes.Buffer)
+			_, _ = buf.ReadFrom(body)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buf.Bytes())
+		}))
+		network := &netHandle{}
+		network.logger = logger.NewLogger().Child("network")
+		network.httpClient = http.DefaultClient
+		eventData := `[{"event":"Signed Up"}]`
+		var structData integrations.PostParametersT
+		structData.RequestMethod = "POST"
+		structData.Type = "REST"
+		structData.URL = testServer.URL
+		structData.UserID = "anon_id"
+		structData.Body = map[string]interface{}{
+			"GZIP": map[string]interface{}{
+				"payload": eventData,
+			},
+		}
+
+		resp := network.SendPost(context.Background(), structData)
+		require.Equal(r, resp.StatusCode, http.StatusOK)
+		require.Equal(r, string(resp.ResponseBody), eventData)
+	})
+
+	t.Run("should fail to send Gzip data when payload is missing", func(r *testing.T) {
+		network := &netHandle{}
+		network.logger = logger.NewLogger().Child("network")
+		network.httpClient = http.DefaultClient
+		eventData := `[{"event":"Signed Up"}]`
+		var structData integrations.PostParametersT
+		structData.RequestMethod = "POST"
+		structData.Type = "REST"
+		structData.UserID = "anon_id"
+		structData.Body = map[string]interface{}{
+			"GZIP": map[string]interface{}{
+				"abc": eventData,
+			},
+		}
+
+		resp := network.SendPost(context.Background(), structData)
+		require.Equal(r, resp.StatusCode, http.StatusBadRequest)
+		require.Equal(r, resp.ResponseBody, []byte("400 Unable to parse json list. Unexpected transformer response"))
+	})
 }
 
 var _ = Describe("Network", func() {
@@ -46,7 +110,7 @@ var _ = Describe("Network", func() {
 
 	Context("Send requests", func() {
 		It("should successfully send the request to google analytics", func() {
-			network := &NetHandleT{}
+			network := &netHandle{}
 			network.logger = logger.NewLogger().Child("network")
 			network.httpClient = c.mockHTTPClient
 
@@ -100,7 +164,7 @@ var _ = Describe("Network", func() {
 		})
 
 		It("should respect ctx cancelation", func() {
-			network := &NetHandleT{}
+			network := &netHandle{}
 			network.logger = logger.NewLogger().Child("network")
 			network.httpClient = &http.Client{}
 
@@ -121,7 +185,7 @@ var _ = Describe("Network", func() {
 
 	Context("Verify response bodies are propagated/filtered based on the response's content-type", func() {
 		const mockResponseBody = `[{"full_name": "mock-repo"}]`
-		var network *NetHandleT
+		var network *netHandle
 		var requestParams integrations.PostParametersT
 		var mockResponse http.Response
 		var mockResponseContentType func(contentType string) = func(contentType string) {
@@ -131,7 +195,7 @@ var _ = Describe("Network", func() {
 		}
 
 		BeforeEach(func() {
-			network = &NetHandleT{}
+			network = &netHandle{}
 			network.logger = logger.NewLogger().Child("network")
 			network.httpClient = c.mockHTTPClient
 
@@ -148,6 +212,7 @@ var _ = Describe("Network", func() {
 				"FORM": map[string]interface{}{},
 				"JSON": map[string]interface{}{},
 				"XML":  map[string]interface{}{},
+				"GZIP": map[string]interface{}{},
 			}
 			requestParams.Files = map[string]interface{}{}
 

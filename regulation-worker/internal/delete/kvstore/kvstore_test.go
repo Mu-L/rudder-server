@@ -2,59 +2,33 @@ package kvstore_test
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 	"testing"
 
 	"github.com/go-redis/redis"
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
+	dockerredis "github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/redis"
 	"github.com/rudderlabs/rudder-server/regulation-worker/internal/delete/kvstore"
-	"github.com/rudderlabs/rudder-server/regulation-worker/internal/initialize"
 	"github.com/rudderlabs/rudder-server/regulation-worker/internal/model"
 	"github.com/rudderlabs/rudder-server/services/kvstoremanager"
 )
 
-var (
-	redisAddress string
-	hold         bool
-)
-
-func TestMain(m *testing.M) {
-	initialize.Init()
-	os.Exit(run(m))
-}
-
-func run(m *testing.M) int {
-	flag.BoolVar(&hold, "hold", false, "hold environment clean-up after test execution until Ctrl+C is provided")
-	flag.Parse()
-
+func TestRedisDeletion(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	if err != nil {
 		log.Fatalf("Could not connect to docker: %s", err)
 	}
-
-	resource, err := pool.Run("redis", "alpine3.14", []string{})
+	resource, err := dockerredis.Setup(context.Background(), pool, t)
 	if err != nil {
 		log.Panicf("Could not start resource: %s", err)
 	}
-	defer func() {
-		if err := pool.Purge(resource); err != nil {
-			log.Printf("Could not purge resource: %s \n", err)
-		}
-	}()
-
-	redisAddress = fmt.Sprintf("localhost:%s", resource.GetPort("6379/tcp"))
-
 	if err := pool.Retry(func() error {
 		var err error
 		client := redis.NewClient(&redis.Options{
-			Addr:     redisAddress,
+			Addr:     resource.Addr,
 			Password: "",
 			DB:       0,
 		})
@@ -65,29 +39,7 @@ func run(m *testing.M) int {
 	}); err != nil {
 		log.Panicf("Could not connect to docker: %s", err)
 	}
-	code := m.Run()
 
-	blockOnHold()
-
-	return code
-}
-
-func blockOnHold() {
-	if !hold {
-		return
-	}
-
-	log.Println("Test on hold, before cleanup")
-	log.Println("Press Ctrl+C to exit")
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	<-c
-	close(c)
-}
-
-func TestRedisDeletion(t *testing.T) {
 	inputTestData := []struct {
 		key    string
 		fields map[string]interface{}
@@ -113,13 +65,15 @@ func TestRedisDeletion(t *testing.T) {
 		},
 	}
 
-	destName := "REDIS"
-	destConfig := map[string]interface{}{
-		"clusterMode": false,
-		"address":     redisAddress,
+	dest := model.Destination{
+		Config: map[string]interface{}{
+			"clusterMode": false,
+			"address":     resource.Addr,
+		},
+		Name: "REDIS",
 	}
 
-	manager := kvstoremanager.New(destName, destConfig)
+	manager := kvstoremanager.New(dest.Name, dest.Config)
 
 	// inserting test data in Redis
 	for _, test := range inputTestData {
@@ -155,8 +109,9 @@ func TestRedisDeletion(t *testing.T) {
 	}
 
 	// deleting the last key inserted
-	status := kvstore.Delete(ctx, deleteJob, destConfig, destName)
-	require.Equal(t, model.JobStatusComplete, status, "actual deletion status different than expected")
+	status := kvstore.Delete(ctx, deleteJob, dest)
+	fmt.Println("status: ", status)
+	require.Equal(t, model.JobStatus{Status: model.JobStatusComplete}, status, "actual deletion status different than expected")
 
 	fieldCountAfterDelete := make([]int, len(inputTestData))
 	for i, test := range inputTestData {

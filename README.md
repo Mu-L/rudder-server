@@ -1,11 +1,11 @@
 <p align="center">
-  🔥 <b>New: Just launched <a href="https://github.com/rudderlabs/rudder-server/discussions/2401">RudderStack v1.0</a></b>
+📖 Just launched <b><a href="https://www.rudderstack.com/learn/">Data Learning Center</a></b> - Resources on data engineering and data infrastructure
   <br/>
  </p>
 
 <p align="center">
   <a href="https://www.rudderstack.com/">
-    <img src="resources/logo.png">
+    <img src="resources/rs-logo-full-duotone-dark.jpg" height="64px">
   </a>
 </p>
 
@@ -21,9 +21,6 @@
   <a href="https://goreportcard.com/report/github.com/rudderlabs/rudder-server">
     <img src="https://goreportcard.com/badge/github.com/rudderlabs/rudder-server">
   </a>
-  <a href="https://deepsource.io/gh/rudderlabs/rudder-server/?ref=repository-badge}" target="_blank">
-    <img alt="DeepSource" title="DeepSource" src="https://deepsource.io/gh/rudderlabs/rudder-server.svg/?label=active+issues&show_trend=true&token=D0StFW4hMiC1YMmYQWyS7PQQ"/>
-  </a>
   <a href="https://github.com/rudderlabs/rudder-server/releases">
     <img src="https://img.shields.io/github/v/release/rudderlabs/rudder-server?color=blue&sort=semver">
   </a>
@@ -31,7 +28,7 @@
     <img src="https://img.shields.io/docker/pulls/rudderlabs/rudder-server">
   </a>
   <a href="https://github.com/rudderlabs/rudder-server/blob/master/LICENSE">
-    <img src="https://img.shields.io/github/license/rudderlabs/rudder-server">
+    <img src="https://img.shields.io/static/v1?label=license&message=ELv2&color=7447fc">
   </a>
 </p>
 
@@ -76,7 +73,7 @@ With RudderStack, you can build customer data pipelines that connect your whole 
 
 - **Privacy and Security**: You can collect and store your customer data without sending everything to a third-party vendor. With RudderStack, you get fine-grained control over what data to forward to which analytical tool.
 
-- **Unlimited Events**: Event volume-based pricing of most of the commercial systems is broken. With RudderStack, you are be able to collect as much data as possible without worrying about overrunning your event budgets.
+- **Unlimited Events**: Event volume-based pricing of most of the commercial systems is broken. With RudderStack Open Source, you can collect as much data as possible without worrying about overrunning your event budgets.
 
 - **Segment API-compatible**: RudderStack is fully compatible with the Segment API. So you don't need to change your app if you are using Segment; just integrate the RudderStack SDKs into your app and your events will keep flowing to the destinations (including data warehouses) as before.
 
@@ -120,6 +117,5 @@ We would love to see you contribute to RudderStack. Get more information on how 
 
 ## License
 
-RudderStack server is released under the [**AGPLv3 License**](https://github.com/rudderlabs/rudder-server/blob/master/LICENSE).
+RudderStack server is released under the [**Elastic License 2.0**](LICENSE).
 
-Read [**our blog**](https://www.rudderstack.com/blog/rudderstacks-licensing-explained/) to know more about how our software is licensed.
