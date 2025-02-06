@@ -4,11 +4,14 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	mock_backendconfig "github.com/rudderlabs/rudder-server/mocks/config/backend-config"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
+	mock_backendconfig "github.com/rudderlabs/rudder-server/mocks/backend-config"
 	"github.com/rudderlabs/rudder-server/utils/pubsub"
 )
 
@@ -19,17 +22,10 @@ func TestFileUploaderUpdatingWithConfigBackend(t *testing.T) {
 
 	configCh := make(chan pubsub.DataEvent)
 
-	var ready sync.WaitGroup
-	ready.Add(2)
-
-	var storageSettings sync.WaitGroup
-	storageSettings.Add(1)
-
 	config.EXPECT().Subscribe(
 		gomock.Any(),
 		gomock.Eq(backendconfig.TopicBackendConfig),
 	).DoAndReturn(func(ctx context.Context, topic backendconfig.Topic) pubsub.DataChannel {
-		ready.Done()
 		go func() {
 			<-ctx.Done()
 			close(configCh)
@@ -44,15 +40,16 @@ func TestFileUploaderUpdatingWithConfigBackend(t *testing.T) {
 	var err error
 	var preferences backendconfig.StoragePreferences
 
-	go func() {
-		ready.Done()
-		preferences, err = fileUploaderProvider.GetStoragePreferences("testWorkspaceId-1")
-		storageSettings.Done()
-	}()
-
 	// When the config backend has not published any event yet
-	ready.Wait()
+	ctx2, cancel2 := context.WithTimeout(ctx, 50*time.Millisecond)
+	preferences, err = fileUploaderProvider.GetStoragePreferences(ctx2, "testWorkspaceId-1")
 	Expect(preferences).To(BeEquivalentTo(backendconfig.StoragePreferences{}))
+	Expect(err).To(Equal(context.DeadlineExceeded))
+	cancel2()
+
+	t.Setenv("JOBS_BACKUP_STORAGE_PROVIDER", "S3") // default rudder storage provider
+	t.Setenv("JOBS_BACKUP_DEFAULT_PREFIX", "defaultPrefixWithStorageTTL")
+	t.Setenv("JOBS_BACKUP_PREFIX", "fullStoragePrefixWithNoTTL")
 
 	// When user has not configured any storage
 	configCh <- pubsub.DataEvent{
@@ -62,11 +59,14 @@ func TestFileUploaderUpdatingWithConfigBackend(t *testing.T) {
 				Settings: backendconfig.Settings{
 					DataRetention: backendconfig.DataRetention{
 						UseSelfStorage: false,
-						StorageBucket:  backendconfig.StorageBucket{},
+						StorageBucket: backendconfig.StorageBucket{
+							Type: "S3",
+						},
 						StoragePreferences: backendconfig.StoragePreferences{
 							ProcErrors:   true,
 							GatewayDumps: false,
 						},
+						RetentionPeriod: "full",
 					},
 				},
 			},
@@ -86,25 +86,115 @@ func TestFileUploaderUpdatingWithConfigBackend(t *testing.T) {
 					},
 				},
 			},
+			"testWorkspaceId-3": {
+				WorkspaceID: "testWorkspaceId-3",
+				Settings: backendconfig.Settings{
+					DataRetention: backendconfig.DataRetention{
+						UseSelfStorage: false,
+						StorageBucket: backendconfig.StorageBucket{
+							Type:   "S3",
+							Config: map[string]interface{}{},
+						},
+						StoragePreferences: backendconfig.StoragePreferences{
+							ProcErrors:   false,
+							GatewayDumps: false,
+						},
+						RetentionPeriod: "default",
+					},
+				},
+			},
 		},
 		Topic: string(backendconfig.TopicBackendConfig),
 	}
 
-	storageSettings.Wait()
-	Expect(preferences).To(Equal(
-		backendconfig.StoragePreferences{
+	require.Eventually(t, func() bool {
+		fm1, err := fileUploaderProvider.GetFileManager(ctx, "testWorkspaceId-1")
+		if err != nil {
+			return false
+		}
+		if fm1 == nil || fm1.Prefix() != "fullStoragePrefixWithNoTTL" {
+			return false
+		}
+
+		fm3, err := fileUploaderProvider.GetFileManager(ctx, "testWorkspaceId-3")
+		if err != nil {
+			return false
+		}
+		if fm3 == nil || fm3.Prefix() != "defaultPrefixWithStorageTTL" {
+			return false
+		}
+
+		fm0, err := fileUploaderProvider.GetFileManager(ctx, "testWorkspaceId-0")
+		if err != ErrNoStorageForWorkspace {
+			return false
+		}
+		if fm0 != nil {
+			return false
+		}
+
+		fm2, err := fileUploaderProvider.GetFileManager(ctx, "testWorkspaceId-2")
+		if err != ErrNoStorageForWorkspace {
+			return false
+		}
+		if fm2 != nil {
+			return false
+		}
+
+		preferences, err := fileUploaderProvider.GetStoragePreferences(ctx, "testWorkspaceId-1")
+		if err != nil {
+			return false
+		}
+		if preferences != (backendconfig.StoragePreferences{
 			ProcErrors:   true,
 			GatewayDumps: false,
+		}) {
+			return false
+		}
+
+		preferences, err = fileUploaderProvider.GetStoragePreferences(ctx, "testWorkspaceId-0")
+		if err != ErrNoStorageForWorkspace {
+			return false
+		}
+		if preferences != (backendconfig.StoragePreferences{}) {
+			return false
+		}
+
+		preferences, err = fileUploaderProvider.GetStoragePreferences(ctx, "testWorkspaceId-2")
+		if err != ErrNoStorageForWorkspace {
+			return false
+		}
+		if preferences != (backendconfig.StoragePreferences{}) {
+			return false
+		}
+
+		return true
+	}, time.Second, 50*time.Millisecond)
+
+	configCh <- pubsub.DataEvent{
+		Data: map[string]backendconfig.ConfigT{
+			"testWorkspaceId-2": {
+				WorkspaceID: "testWorkspaceId-2",
+				Settings: backendconfig.Settings{
+					DataRetention: backendconfig.DataRetention{
+						UseSelfStorage: true,
+						StorageBucket: backendconfig.StorageBucket{
+							Type:   "S3",
+							Config: map[string]interface{}{},
+						},
+						StoragePreferences: backendconfig.StoragePreferences{
+							ProcErrors:   false,
+							GatewayDumps: false,
+						},
+					},
+				},
+			},
 		},
-	))
-
-	preferences, err = fileUploaderProvider.GetStoragePreferences("testWorkspaceId-0")
-	Expect(err).To(HaveOccurred())
-	Expect(preferences).To(BeEquivalentTo(backendconfig.StoragePreferences{}))
-
-	preferences, err = fileUploaderProvider.GetStoragePreferences("testWorkspaceId-2")
-	Expect(err).To(BeNil())
-	Expect(preferences).To(BeEquivalentTo(backendconfig.StoragePreferences{}))
+	}
+	require.Eventually(t, func() bool {
+		t.Log("testWorkspaceId-2 uploader not updated yet")
+		_, err := fileUploaderProvider.GetFileManager(ctx, "testWorkspaceId-2")
+		return err == nil
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestFileUploaderWithoutConfigUpdates(t *testing.T) {
@@ -127,8 +217,9 @@ func TestFileUploaderWithoutConfigUpdates(t *testing.T) {
 	})
 
 	p := NewProvider(context.Background(), config)
-	_, err := p.GetStoragePreferences("testWorkspaceId-1")
-	Expect(err).To(HaveOccurred())
+	ready.Wait()
+	_, err := p.GetFileManager(context.Background(), "testWorkspaceId-1")
+	Expect(err).To(Equal(ErrNotSubscribed))
 }
 
 func TestStaticProvider(t *testing.T) {
@@ -152,11 +243,11 @@ func TestStaticProvider(t *testing.T) {
 	}
 	p := NewStaticProvider(storageSettings)
 
-	prefs, err := p.GetStoragePreferences("testWorkspaceId-1")
+	prefs, err := p.GetStoragePreferences(context.Background(), "testWorkspaceId-1")
 	Expect(err).To(BeNil())
 	Expect(prefs).To(BeEquivalentTo(prefs))
 
-	_, err = p.GetFileManager("testWorkspaceId-1")
+	_, err = p.GetFileManager(context.Background(), "testWorkspaceId-1")
 	Expect(err).To(BeNil())
 }
 
@@ -164,7 +255,7 @@ func TestDefaultProvider(t *testing.T) {
 	RegisterTestingT(t)
 	d := NewDefaultProvider()
 
-	prefs, err := d.GetStoragePreferences("")
+	prefs, err := d.GetStoragePreferences(context.Background(), "")
 	Expect(err).To(BeNil())
 	Expect(prefs).To(BeEquivalentTo(backendconfig.StoragePreferences{
 		ProcErrors:       true,
@@ -174,17 +265,16 @@ func TestDefaultProvider(t *testing.T) {
 		RouterDumps:      true,
 	}))
 
-	_, err = d.GetFileManager("")
+	_, err = d.GetFileManager(context.Background(), "")
 	Expect(err).To(BeNil())
 }
 
 func TestOverride(t *testing.T) {
 	RegisterTestingT(t)
 	config := map[string]interface{}{
-		"a":          "1",
-		"b":          "2",
-		"c":          "3",
-		"externalId": "externalId",
+		"a": "1",
+		"b": "2",
+		"c": "3",
 	}
 	settings := backendconfig.StorageBucket{
 		Type: "S3",
@@ -195,10 +285,33 @@ func TestOverride(t *testing.T) {
 	}
 	bucket := overrideWithSettings(config, settings, "wrk-1")
 	Expect(bucket.Config).To(Equal(map[string]interface{}{
+		"a": "1",
+		"b": "4",
+		"c": "3",
+		"d": "5",
+	}))
+
+	config = map[string]interface{}{
+		"a":          "1",
+		"b":          "2",
+		"c":          "3",
+		"iamRoleArn": "abc",
+	}
+	settings = backendconfig.StorageBucket{
+		Type: "S3",
+		Config: map[string]interface{}{
+			"b": "4",
+			"d": "5",
+		},
+	}
+
+	bucket = overrideWithSettings(config, settings, "wrk-1")
+	Expect(bucket.Config).To(Equal(map[string]interface{}{
 		"a":          "1",
 		"b":          "4",
 		"c":          "3",
 		"d":          "5",
-		"externalId": "wrk-1",
+		"iamRoleArn": "abc",
+		"externalID": "wrk-1",
 	}))
 }

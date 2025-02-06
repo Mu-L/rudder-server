@@ -10,12 +10,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/gofrs/uuid"
+	"github.com/google/uuid"
 	"github.com/iancoleman/strcase"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/rudderlabs/rudder-server/config"
-	"github.com/rudderlabs/rudder-server/utils/logger"
+
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-server/utils/timeutil"
 )
 
@@ -44,8 +45,7 @@ var _ = Describe("Misc", func() {
 			Expect(err).To(BeNil())
 			Expect(FileExists(path)).To(BeTrue())
 			Expect(FolderExists(targetDir)).To(BeTrue())
-
-			defer file.Close()
+			_ = file.Close()
 		}
 		onPostFileCreation := func(sourceFile, targetDir string) {
 			RemoveFilePaths(sourceFile)
@@ -57,7 +57,7 @@ var _ = Describe("Misc", func() {
 
 		It("Rudder Async Destination Logs", func() {
 			localTmpDirName := fmt.Sprintf(`/%s/`, RudderAsyncDestinationLogs)
-			uuid := uuid.Must(uuid.NewV4())
+			uuid := uuid.New()
 
 			// /tmp/rudder-async-destination-logs/SourceID.28da0aa8-f47d-422c-9cc8-f19d14ff158c.txt
 			// /tmp/rudder-async-destination-logs/
@@ -118,7 +118,7 @@ var _ = Describe("Misc", func() {
 
 		It("Rudder Warehouse Staging Uploads", func() {
 			localTmpDirName := fmt.Sprintf(`/%s/`, RudderWarehouseStagingUploads)
-			uuid := uuid.Must(uuid.NewV4())
+			uuid := uuid.New()
 
 			// /tmp/rudder-warehouse-staging-uploads/1640923547.SourceId.abe7383c-1bb9-4b23-9f51-2e08280cbb71.json.gz
 			// /tmp/rudder-warehouse-staging-uploads/
@@ -136,7 +136,7 @@ var _ = Describe("Misc", func() {
 
 		It("Rudder Raw Data Destination Logs", func() {
 			localTmpDirName := fmt.Sprintf(`/%s/`, RudderRawDataDestinationLogs)
-			uuid := uuid.Must(uuid.NewV4())
+			uuid := uuid.New()
 
 			// /tmp/rudder-raw-data-destination-logs/1640923547.SourceId.d481fbd8-df3a-4eed-b691-2381b260ca28.json.gz
 			// /tmp/rudder-raw-data-destination-logs/
@@ -228,7 +228,7 @@ var _ = Describe("Misc", func() {
 
 		It("Rudder Identity Merge Rules Tmp", func() {
 			localTmpDirName := fmt.Sprintf(`/%s/`, RudderIdentityMergeRulesTmp)
-			uuid := uuid.Must(uuid.NewV4())
+			uuid := uuid.New()
 
 			// /tmp/rudder-identity-merge-rules-tmp/DestinationName_DestinationId/UploadId/71a855c2-0535-43d1-9f00-556ecc971cc7.csv.gz
 			// /tmp/rudder-identity-merge-rules-tmp/DestinationName_DestinationId/
@@ -265,7 +265,7 @@ var _ = Describe("Misc", func() {
 
 		It("Rudder Identity Mappings Tmp", func() {
 			localTmpDirName := fmt.Sprintf(`/%s/`, RudderIdentityMappingsTmp)
-			uuid := uuid.Must(uuid.NewV4())
+			uuid := uuid.New()
 
 			// /tmp/rudder-identity-mappings-tmp/DestinationName_DestinationId/UploadId/b012ad98-1cde-4d27-a415-cdb84021180c.csv.gz
 			// /tmp/rudder-identity-mappings-tmp/DestinationName_DestinationId/
@@ -302,7 +302,7 @@ var _ = Describe("Misc", func() {
 
 		It("Rudder Redshift Manifests", func() {
 			localTmpDirName := fmt.Sprintf(`/%s/`, RudderRedshiftManifests)
-			uuid := uuid.Must(uuid.NewV4())
+			uuid := uuid.New()
 
 			// /tmp/rudder-redshift-manifests/688d39e8-90a7-4419-986d-0c14af3760e9
 			// /tmp/rudder-redshift-manifests/
@@ -411,7 +411,7 @@ var _ = Describe("Misc", func() {
 			sourceFile := fmt.Sprintf(`%v%v.%v.%v.csv.gz`,
 				tmpDirPath+localTmpDirName,
 				"DestinationID",
-				uuid.Must(uuid.NewV4()),
+				uuid.New(),
 				time.Now().Unix(),
 			)
 
@@ -440,7 +440,7 @@ var _ = Describe("Misc", func() {
 				"Folder8",
 				"SourceID",
 				"DestinationID",
-				uuid.Must(uuid.NewV4()),
+				uuid.New(),
 			)
 
 			targetDir := fmt.Sprintf(`%v`,
@@ -456,7 +456,7 @@ var _ = Describe("Misc", func() {
 				tmpDirPath+localTmpDirName,
 				"SourceID",
 				"DestinationID",
-				uuid.Must(uuid.NewV4()),
+				uuid.New(),
 			)
 
 			targetDir = fmt.Sprintf(`%v`,
@@ -501,28 +501,6 @@ var _ = Describe("Misc", func() {
 		Entry("Unique Test 2 : ", []string{"a", "b", "c"}, []string{"a", "b", "c"}),
 	)
 })
-
-func TestContains(t *testing.T) {
-	t.Run("strings", func(t *testing.T) {
-		list := []string{"a", "b", "c"}
-
-		for _, item := range list {
-			require.True(t, Contains(list, item))
-		}
-
-		require.False(t, Contains(list, "0"))
-	})
-
-	t.Run("int", func(t *testing.T) {
-		list := []int{1, 2, 3}
-
-		for _, item := range list {
-			require.True(t, Contains(list, item))
-		}
-
-		require.False(t, Contains(list, -1))
-	})
-}
 
 func TestHasAWSRoleARNInConfig(t *testing.T) {
 	t.Run("Config has valid IAM Role ARN", func(t *testing.T) {
@@ -651,4 +629,162 @@ func FileExists(path string) (bool, error) {
 	}
 
 	return !fileInfo.IsDir(), nil
+}
+
+func TestMapLookup(t *testing.T) {
+	m := map[string]interface{}{
+		"foo": "bar",
+		"baz": "qux",
+	}
+	require.Nil(t, MapLookup(m, "foo", "baz"))
+
+	m = map[string]interface{}{
+		"foo": map[string]interface{}{
+			"baz": "qux",
+		},
+	}
+	require.Equal(t, "qux", MapLookup(m, "foo", "baz"))
+
+	m = map[string]interface{}{
+		"hello": map[string]interface{}{
+			"foo": "bar",
+		},
+	}
+	require.Nil(t, MapLookup(m, "foo"))
+}
+
+func TestNestedMapLookup(t *testing.T) {
+	m1 := map[string]interface{}{
+		"nestedKey1": map[string]interface{}{
+			"nestedKey2": map[string]interface{}{
+				"nestedKey3": "nestedValue2",
+			},
+			"nestedKey4": "nestedValue4",
+		},
+		"key5":      "value5",
+		"arrayKey6": []interface{}{1, "sow"},
+	}
+
+	type testCaseT struct {
+		caseName      string
+		inputKeys     []string
+		expectedValue interface{}
+		expectedError error
+	}
+
+	testCases := []testCaseT{
+		{
+			caseName:  "nested-keys are found",
+			inputKeys: []string{"nestedKey1", "nestedKey2"},
+			expectedValue: map[string]interface{}{
+				"nestedKey3": "nestedValue2",
+			},
+		},
+		{
+			caseName:      "single-key is found",
+			inputKeys:     []string{"key5"},
+			expectedValue: "value5",
+		},
+		{
+			caseName:      "one of the key is not found",
+			inputKeys:     []string{"nestedKey1", "nestedKey3"},
+			expectedError: fmt.Errorf("key: nestedKey3 not found"),
+		},
+		{
+			caseName:      "arrayKey nested lookup not valid",
+			inputKeys:     []string{"arrayKey6", "someInternalKey"},
+			expectedError: fmt.Errorf("malformed structure at %#v", []interface{}{1, "sow"}),
+		},
+		{
+			caseName:      "one of the nestedKeys are not found",
+			inputKeys:     []string{"nestedKey1", "nestedKey2", "nestedKey6", "nestedKey7"},
+			expectedError: fmt.Errorf("key: nestedKey6 not found"),
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.caseName, func(t *testing.T) {
+			val, err := NestedMapLookup(m1, testCase.inputKeys...)
+			if err != nil {
+				require.EqualError(t, err.Err, testCase.expectedError.Error())
+				return
+			}
+			require.Equal(t, testCase.expectedValue, val)
+		})
+	}
+	t.Run("key not present at all(at level-0)", func(t *testing.T) {
+		searchMap1 := map[string]interface{}{}
+		v, searchErr := NestedMapLookup(searchMap1, "key", "key")
+		require.Equal(t, v, nil)
+		require.Error(t, searchErr.Err)
+		require.EqualError(t, searchErr.Err, "key: key not found")
+		require.Equal(t, searchErr.Level, 0)
+	})
+
+	t.Run("key not found at level-1", func(t *testing.T) {
+		searchMap1 := map[string]interface{}{
+			"key": map[string]interface{}{},
+		}
+		_, searchErr := NestedMapLookup(searchMap1, "key", "key")
+		require.Error(t, searchErr.Err)
+		require.EqualError(t, searchErr.Err, "key: key not found")
+		require.Equal(t, searchErr.Level, 1)
+	})
+	t.Run("key not found at level-0", func(t *testing.T) {
+		searchMap1 := map[string]interface{}{}
+		_, searchErr := NestedMapLookup(searchMap1, "key", "key")
+		require.Error(t, searchErr.Err)
+		require.EqualError(t, searchErr.Err, "key: key not found")
+		require.Equal(t, searchErr.Level, 0)
+	})
+}
+
+func TestGetDiskUsage(t *testing.T) {
+	initMisc()
+	// Create a temp file
+	tmpDirPath := t.TempDir()
+	tempFilePath := filepath.Join(tmpDirPath, "tempFileForDiskUsage")
+	f, err := os.OpenFile(tempFilePath, os.O_CREATE|os.O_RDWR, 0o755) // skipcq: GSC-G302
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+	defer os.Remove(tempFilePath)
+
+	err = f.Truncate(1024 * 1024)
+	require.NoError(t, err)
+
+	fileSize, err := os.Stat(tempFilePath)
+	require.NoError(t, err)
+	fileDiskUsage, err := GetDiskUsageOfFile(tempFilePath)
+	require.NoError(t, err)
+	require.EqualValues(t, 1024*1024, fileSize.Size())
+	require.EqualValues(t, 0, fileDiskUsage)
+
+	// write some bytes into the file
+	_, err = f.WriteString("test")
+	require.NoError(t, err)
+	fileSize, err = os.Stat(tempFilePath)
+	require.NoError(t, err)
+	fileDiskUsage, err = GetDiskUsageOfFile(tempFilePath)
+	require.NoError(t, err)
+
+	require.EqualValues(t, 1024*1024, fileSize.Size())
+	require.Greater(t, fileDiskUsage, int64(0))
+}
+
+func Test_GetInstanceID(t *testing.T) {
+	t.Setenv("INSTANCE_ID", "allbirds-v0-rudderstack-gw-ha-0-85d66f748f-8w4td")
+	require.Equal(t, "0", GetInstanceID())
+
+	t.Setenv("INSTANCE_ID", "prousmtusmt-v0-rs-gw-0")
+	require.Equal(t, "0", GetInstanceID())
+
+	t.Setenv("INSTANCE_ID", "prousmtusmt-v0-rs")
+	require.Equal(t, "", GetInstanceID())
+
+	t.Setenv("INSTANCE_ID", "prousmtusmt-v0-rs-gw-10")
+	require.Equal(t, "10", GetInstanceID())
+
+	t.Setenv("INSTANCE_ID", "prousmtusmt-v0-rs-gw-ha-12-234234-10")
+	require.Equal(t, "12", GetInstanceID())
 }

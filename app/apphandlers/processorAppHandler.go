@@ -2,214 +2,322 @@ package apphandlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/rudderlabs/rudder-server/utils/httputil"
-	"github.com/rudderlabs/rudder-server/utils/types/deployment"
-	"github.com/rudderlabs/rudder-server/utils/types/servermode"
+	"github.com/go-chi/chi/v5"
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/bugsnag/bugsnag-go/v2"
-	"github.com/gorilla/mux"
-
+	"github.com/rudderlabs/rudder-go-kit/config"
+	kithttputil "github.com/rudderlabs/rudder-go-kit/httputil"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-server/app"
 	"github.com/rudderlabs/rudder-server/app/cluster"
-	"github.com/rudderlabs/rudder-server/app/cluster/state"
-	"github.com/rudderlabs/rudder-server/config"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-server/archiver"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
+	drain_config "github.com/rudderlabs/rudder-server/internal/drain-config"
+	"github.com/rudderlabs/rudder-server/internal/pulsar"
 	"github.com/rudderlabs/rudder-server/jobsdb"
-	"github.com/rudderlabs/rudder-server/jobsdb/prebackup"
 	proc "github.com/rudderlabs/rudder-server/processor"
 	"github.com/rudderlabs/rudder-server/router"
 	"github.com/rudderlabs/rudder-server/router/batchrouter"
 	routerManager "github.com/rudderlabs/rudder-server/router/manager"
-	"github.com/rudderlabs/rudder-server/services/db"
+	"github.com/rudderlabs/rudder-server/router/throttler"
+	schema_forwarder "github.com/rudderlabs/rudder-server/schema-forwarder"
 	destinationdebugger "github.com/rudderlabs/rudder-server/services/debugger/destination"
 	transformationdebugger "github.com/rudderlabs/rudder-server/services/debugger/transformation"
-	fileuploader "github.com/rudderlabs/rudder-server/services/fileuploader"
-	"github.com/rudderlabs/rudder-server/services/multitenant"
-	"github.com/rudderlabs/rudder-server/services/stats"
+	"github.com/rudderlabs/rudder-server/services/fileuploader"
+	"github.com/rudderlabs/rudder-server/services/transformer"
 	"github.com/rudderlabs/rudder-server/services/transientsource"
+	"github.com/rudderlabs/rudder-server/utils/crash"
 	"github.com/rudderlabs/rudder-server/utils/misc"
+	"github.com/rudderlabs/rudder-server/utils/payload"
 	"github.com/rudderlabs/rudder-server/utils/types"
+	"github.com/rudderlabs/rudder-server/utils/types/deployment"
 )
 
-// ProcessorApp is the type for Processor type implemention
-type ProcessorApp struct {
-	App            app.App
-	VersionHandler func(w http.ResponseWriter, r *http.Request)
+// processorApp is the type for Processor type implementation
+type processorApp struct {
+	setupDone      bool
+	app            app.App
+	versionHandler func(w http.ResponseWriter, r *http.Request)
+	log            logger.Logger
+	config         struct {
+		processorDSLimit   config.ValueLoader[int]
+		routerDSLimit      config.ValueLoader[int]
+		batchRouterDSLimit config.ValueLoader[int]
+		gatewayDSLimit     config.ValueLoader[int]
+		http               struct {
+			ReadTimeout       time.Duration
+			ReadHeaderTimeout time.Duration
+			WriteTimeout      time.Duration
+			IdleTimeout       time.Duration
+			webPort           int
+			MaxHeaderBytes    int
+		}
+	}
 }
 
-var (
-	gatewayDB          *jobsdb.HandleT
-	ReadTimeout        time.Duration
-	ReadHeaderTimeout  time.Duration
-	WriteTimeout       time.Duration
-	IdleTimeout        time.Duration
-	webPort            int
-	MaxHeaderBytes     int
-	processorDSLimit   int
-	routerDSLimit      int
-	batchRouterDSLimit int
-	gatewayDSLimit     int
-)
-
-func (*ProcessorApp) GetAppType() string {
-	return fmt.Sprintf("rudder-server-%s", app.PROCESSOR)
+func (a *processorApp) Setup() error {
+	a.config.http.ReadTimeout = config.GetDurationVar(0, time.Second, []string{"ReadTimeout", "ReadTimeOutInSec"}...)
+	a.config.http.ReadHeaderTimeout = config.GetDurationVar(0, time.Second, []string{"ReadHeaderTimeout", "ReadHeaderTimeoutInSec"}...)
+	a.config.http.WriteTimeout = config.GetDurationVar(10, time.Second, []string{"WriteTimeout", "WriteTimeOutInSec"}...)
+	a.config.http.IdleTimeout = config.GetDurationVar(720, time.Second, []string{"IdleTimeout", "IdleTimeoutInSec"}...)
+	a.config.http.webPort = config.GetIntVar(8086, 1, "Processor.webPort")
+	a.config.http.MaxHeaderBytes = config.GetIntVar(524288, 1, "MaxHeaderBytes")
+	a.config.processorDSLimit = config.GetReloadableIntVar(0, 1, "Processor.jobsDB.dsLimit", "JobsDB.dsLimit")
+	a.config.gatewayDSLimit = config.GetReloadableIntVar(0, 1, "Gateway.jobsDB.dsLimit", "JobsDB.dsLimit")
+	a.config.routerDSLimit = config.GetReloadableIntVar(0, 1, "Router.jobsDB.dsLimit", "JobsDB.dsLimit")
+	a.config.batchRouterDSLimit = config.GetReloadableIntVar(0, 1, "BatchRouter.jobsDB.dsLimit", "JobsDB.dsLimit")
+	if err := rudderCoreDBValidator(); err != nil {
+		return err
+	}
+	if err := rudderCoreNodeSetup(); err != nil {
+		return err
+	}
+	a.setupDone = true
+	return nil
 }
 
-func Init() {
-	loadConfigHandler()
-}
+func (a *processorApp) StartRudderCore(ctx context.Context, options *app.Options) error {
+	config := config.Default
+	statsFactory := stats.Default
+	if !a.setupDone {
+		return fmt.Errorf("processor service cannot start, database is not setup")
+	}
+	a.log.Info("Processor starting")
 
-func loadConfigHandler() {
-	config.RegisterDurationConfigVariable(0, &ReadTimeout, false, time.Second, []string{"ReadTimeout", "ReadTimeOutInSec"}...)
-	config.RegisterDurationConfigVariable(0, &ReadHeaderTimeout, false, time.Second, []string{"ReadHeaderTimeout", "ReadHeaderTimeoutInSec"}...)
-	config.RegisterDurationConfigVariable(10, &WriteTimeout, false, time.Second, []string{"WriteTimeout", "WriteTimeOutInSec"}...)
-	config.RegisterDurationConfigVariable(720, &IdleTimeout, false, time.Second, []string{"IdleTimeout", "IdleTimeoutInSec"}...)
-	config.RegisterIntConfigVariable(8086, &webPort, false, 1, "Processor.webPort")
-	config.RegisterIntConfigVariable(524288, &MaxHeaderBytes, false, 1, "MaxHeaderBytes")
-	config.RegisterIntConfigVariable(0, &processorDSLimit, true, 1, "Processor.jobsDB.dsLimit", "JobsDB.dsLimit")
-	config.RegisterIntConfigVariable(0, &gatewayDSLimit, true, 1, "Gateway.jobsDB.dsLimit", "JobsDB.dsLimit")
-	config.RegisterIntConfigVariable(0, &routerDSLimit, true, 1, "Router.jobsDB.dsLimit", "JobsDB.dsLimit")
-	config.RegisterIntConfigVariable(0, &batchRouterDSLimit, true, 1, "BatchRouter.jobsDB.dsLimit", "JobsDB.dsLimit")
-}
-
-func (processor *ProcessorApp) StartRudderCore(ctx context.Context, options *app.Options) error {
-	pkgLogger.Info("Processor starting")
-
-	rudderCoreDBValidator()
-	rudderCoreWorkSpaceTableSetup()
-	rudderCoreNodeSetup()
-	rudderCoreBaseSetup()
 	g, ctx := errgroup.WithContext(ctx)
+	terminalErrFn := terminalErrorFunction(ctx, g)
 
 	deploymentType, err := deployment.GetFromEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get deployment type: %w", err)
 	}
-	pkgLogger.Infof("Configured deployment type: %q", deploymentType)
+	a.log.Infof("Configured deployment type: %q", deploymentType)
 
-	reporting := processor.App.Features().Reporting.Setup(backendconfig.DefaultBackendConfig)
+	trackedUsersReporter, err := a.app.Features().TrackedUsers.Setup(config)
+	if err != nil {
+		return fmt.Errorf("could not setup tracked users: %w", err)
+	}
+	err = trackedUsersReporter.MigrateDatabase(misc.GetConnectionString(config, "tracked_users"), config)
+	if err != nil {
+		return fmt.Errorf("could not run tracked users database migration: %w", err)
+	}
 
-	g.Go(misc.WithBugsnag(func() error {
-		reporting.AddClient(ctx, types.Config{ConnInfo: misc.GetConnectionString()})
+	reporting := a.app.Features().Reporting.Setup(ctx, config, backendconfig.DefaultBackendConfig)
+	defer reporting.Stop()
+	syncer := reporting.DatabaseSyncer(types.SyncerConfig{ConnInfo: misc.GetConnectionString(config, "reporting")})
+	g.Go(crash.Wrapper(func() error {
+		syncer()
 		return nil
 	}))
 
-	pkgLogger.Info("Clearing DB ", options.ClearDB)
+	a.log.Info("Clearing DB ", options.ClearDB)
 
-	transformationdebugger.Setup()
-	destinationdebugger.Setup(backendconfig.DefaultBackendConfig)
-
-	reportingI := processor.App.Features().Reporting.GetReportingInstance()
-	transientSources := transientsource.NewService(ctx, backendconfig.DefaultBackendConfig)
-	prebackupHandlers := []prebackup.Handler{
-		prebackup.DropSourceIds(transientSources.SourceIdsSupplier()),
+	transformationhandle, err := transformationdebugger.NewHandle(backendconfig.DefaultBackendConfig)
+	if err != nil {
+		return err
 	}
+	defer transformationhandle.Stop()
+	destinationHandle, err := destinationdebugger.NewHandle(backendconfig.DefaultBackendConfig)
+	if err != nil {
+		return err
+	}
+	defer destinationHandle.Stop()
+
+	transientSources := transientsource.NewService(ctx, backendconfig.DefaultBackendConfig)
 
 	fileUploaderProvider := fileuploader.NewProvider(ctx, backendconfig.DefaultBackendConfig)
 
-	rsourcesService, err := NewRsourcesService(deploymentType)
+	rsourcesService, err := NewRsourcesService(deploymentType, true, statsFactory)
 	if err != nil {
 		return err
+	}
+
+	transformerFeaturesService := transformer.NewFeaturesService(ctx, config, transformer.FeaturesServiceOptions{
+		PollInterval:             config.GetDuration("Transformer.pollInterval", 10, time.Second),
+		TransformerURL:           config.GetString("DEST_TRANSFORM_URL", "http://localhost:9090"),
+		FeaturesRetryMaxAttempts: 10,
+	})
+
+	var dbPool *sql.DB
+	if config.GetBoolVar(true, "db.processor.pool.shared", "db.pool.shared") {
+		dbPool, err = misc.NewDatabaseConnectionPool(ctx, config, statsFactory, "processor-app")
+		if err != nil {
+			return err
+		}
+		defer dbPool.Close()
 	}
 
 	gwDBForProcessor := jobsdb.NewForRead(
 		"gw",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&gatewayDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.gatewayDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Gateway.jobsDB.skipMaintenanceError", true)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer gwDBForProcessor.Close()
-	gatewayDB = gwDBForProcessor
 	routerDB := jobsdb.NewForReadWrite(
 		"rt",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&routerDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.routerDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Router.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer routerDB.Close()
 	batchRouterDB := jobsdb.NewForReadWrite(
 		"batch_rt",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&batchRouterDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.batchRouterDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("BatchRouter.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer batchRouterDB.Close()
-	errDB := jobsdb.NewForReadWrite(
+	errDBForRead := jobsdb.NewForRead(
 		"proc_error",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&processorDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.processorDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
-	var tenantRouterDB jobsdb.MultiTenantJobsDB
-	var multitenantStats multitenant.MultiTenantI
-	if misc.UseFairPickup() {
-		tenantRouterDB = &jobsdb.MultiTenantHandleT{HandleT: routerDB}
-		multitenantStats = multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
-			"rt":       tenantRouterDB,
-			"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
-		})
-	} else {
-		tenantRouterDB = &jobsdb.MultiTenantLegacy{HandleT: routerDB}
-		multitenantStats = multitenant.WithLegacyPickupJobs(multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
-			"rt":       tenantRouterDB,
-			"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
-		}))
+	defer errDBForRead.Close()
+	errDBForWrite := jobsdb.NewForWrite(
+		"proc_error",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", true)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	errDBForWrite.Close()
+	if err = errDBForWrite.Start(); err != nil {
+		return fmt.Errorf("could not start errDBForWrite: %w", err)
 	}
+	defer errDBForWrite.Stop()
+	schemaDB := jobsdb.NewForReadWrite(
+		"esch",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithDSLimit(a.config.processorDSLimit),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer schemaDB.Close()
 
-	var modeProvider cluster.ChangeEventProvider
+	archivalDB := jobsdb.NewForReadWrite(
+		"arc",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithDSLimit(a.config.processorDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithJobMaxAge(
+			func() time.Duration {
+				return config.GetDuration("archival.jobRetention", 24, time.Hour)
+			},
+		),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer archivalDB.Close()
 
-	switch deploymentType {
-	case deployment.MultiTenantType:
-		pkgLogger.Info("using ETCD Based Dynamic Cluster Manager")
-		modeProvider = state.NewETCDDynamicProvider()
-	case deployment.DedicatedType:
-		// FIXME: hacky way to determine servermode
-		pkgLogger.Info("using Static Cluster Manager")
-		if enableProcessor && enableRouter {
-			modeProvider = state.NewStaticProvider(servermode.NormalMode)
-		} else {
-			modeProvider = state.NewStaticProvider(servermode.DegradedMode)
+	var schemaForwarder schema_forwarder.Forwarder
+	if config.GetBool("EventSchemas2.enabled", false) {
+		client, err := pulsar.NewClient(config)
+		if err != nil {
+			return err
 		}
-	default:
-		return fmt.Errorf("unsupported deployment type: %q", deploymentType)
+		defer client.Close()
+		schemaForwarder = schema_forwarder.NewForwarder(terminalErrFn, schemaDB, &client, backendconfig.DefaultBackendConfig, logger.NewLogger().Child("jobs_forwarder"), config, statsFactory)
+	} else {
+		schemaForwarder = schema_forwarder.NewAbortingForwarder(terminalErrFn, schemaDB, logger.NewLogger().Child("jobs_forwarder"), config, statsFactory)
 	}
 
-	p := proc.New(ctx, &options.ClearDB, gwDBForProcessor, routerDB, batchRouterDB, errDB, multitenantStats, reportingI, transientSources, fileUploaderProvider, rsourcesService)
+	modeProvider, err := resolveModeProvider(a.log, deploymentType)
+	if err != nil {
+		return err
+	}
 
+	adaptiveLimit := payload.SetupAdaptiveLimiter(ctx, g)
+
+	enrichers, err := setupPipelineEnrichers(config, a.log, statsFactory)
+	if err != nil {
+		return fmt.Errorf("setting up pipeline enrichers: %w", err)
+	}
+
+	defer func() {
+		for _, enricher := range enrichers {
+			_ = enricher.Close()
+		}
+	}()
+
+	drainConfigManager, err := drain_config.NewDrainConfigManager(config, a.log.Child("drain-config"), statsFactory)
+	if err != nil {
+		return fmt.Errorf("drain config manager setup: %v", err)
+	}
+	defer drainConfigManager.Stop()
+	g.Go(crash.Wrapper(func() (err error) {
+		return drainConfigManager.DrainConfigRoutine(ctx)
+	}))
+	g.Go(crash.Wrapper(func() (err error) {
+		return drainConfigManager.CleanupRoutine(ctx)
+	}))
+
+	p := proc.New(
+		ctx,
+		&options.ClearDB,
+		gwDBForProcessor,
+		routerDB,
+		batchRouterDB,
+		errDBForRead,
+		errDBForWrite,
+		schemaDB,
+		archivalDB,
+		reporting,
+		transientSources,
+		fileUploaderProvider,
+		rsourcesService,
+		transformerFeaturesService,
+		destinationHandle,
+		transformationhandle,
+		enrichers,
+		trackedUsersReporter,
+		proc.WithAdaptiveLimit(adaptiveLimit),
+	)
+	throttlerFactory, err := throttler.NewFactory(config, statsFactory)
+	if err != nil {
+		return fmt.Errorf("failed to create throttler factory: %w", err)
+	}
 	rtFactory := &router.Factory{
-		Reporting:        reportingI,
-		Multitenant:      multitenantStats,
-		BackendConfig:    backendconfig.DefaultBackendConfig,
-		RouterDB:         tenantRouterDB,
-		ProcErrorDB:      errDB,
-		TransientSources: transientSources,
-		RsourcesService:  rsourcesService,
+		Logger:                     logger.NewLogger().Child("router"),
+		Reporting:                  reporting,
+		BackendConfig:              backendconfig.DefaultBackendConfig,
+		RouterDB:                   routerDB,
+		ProcErrorDB:                errDBForWrite,
+		TransientSources:           transientSources,
+		RsourcesService:            rsourcesService,
+		TransformerFeaturesService: transformerFeaturesService,
+		ThrottlerFactory:           throttlerFactory,
+		Debugger:                   destinationHandle,
+		AdaptiveLimit:              adaptiveLimit,
 	}
 	brtFactory := &batchrouter.Factory{
-		Reporting:        reportingI,
-		Multitenant:      multitenantStats,
+		Reporting:        reporting,
 		BackendConfig:    backendconfig.DefaultBackendConfig,
 		RouterDB:         batchRouterDB,
-		ProcErrorDB:      errDB,
+		ProcErrorDB:      errDBForWrite,
 		TransientSources: transientSources,
 		RsourcesService:  rsourcesService,
+		Debugger:         destinationHandle,
+		AdaptiveLimit:    adaptiveLimit,
 	}
-	rt := routerManager.New(rtFactory, brtFactory, backendconfig.DefaultBackendConfig)
+	rt := routerManager.New(rtFactory, brtFactory, backendconfig.DefaultBackendConfig, logger.NewLogger())
 
 	dm := cluster.Dynamic{
 		Provider:         modeProvider,
@@ -217,14 +325,23 @@ func (processor *ProcessorApp) StartRudderCore(ctx context.Context, options *app
 		GatewayDB:        gwDBForProcessor,
 		RouterDB:         routerDB,
 		BatchRouterDB:    batchRouterDB,
-		ErrorDB:          errDB,
+		ErrorDB:          errDBForRead,
+		SchemaForwarder:  schemaForwarder,
+		EventSchemaDB:    schemaDB,
+		ArchivalDB:       archivalDB,
 		Processor:        p,
 		Router:           rt,
-		MultiTenantStat:  multitenantStats,
+		Archiver: archiver.New(
+			archivalDB,
+			fileUploaderProvider,
+			config,
+			statsFactory,
+			archiver.WithAdaptiveLimit(adaptiveLimit),
+		),
 	}
 
 	g.Go(func() error {
-		return startHealthWebHandler(ctx)
+		return a.startHealthWebHandler(ctx, gwDBForProcessor)
 	})
 
 	g.Go(func() error {
@@ -239,8 +356,8 @@ func (processor *ProcessorApp) StartRudderCore(ctx context.Context, options *app
 	})
 
 	g.Go(func() error {
-		replicationLagStat := stats.Default.NewStat("rsources_log_replication_lag", stats.GaugeType)
-		replicationSlotStat := stats.Default.NewStat("rsources_log_replication_slot", stats.GaugeType)
+		replicationLagStat := statsFactory.NewStat("rsources_log_replication_lag", stats.GaugeType)
+		replicationSlotStat := statsFactory.NewStat("rsources_log_replication_slot", stats.GaugeType)
 		rsourcesService.Monitor(ctx, replicationLagStat, replicationSlotStat)
 		return nil
 	})
@@ -248,25 +365,21 @@ func (processor *ProcessorApp) StartRudderCore(ctx context.Context, options *app
 	return g.Wait()
 }
 
-func (*ProcessorApp) HandleRecovery(options *app.Options) {
-	db.HandleNullRecovery(options.NormalMode, options.DegradedMode, misc.AppStartTime, app.PROCESSOR)
-}
-
-func startHealthWebHandler(ctx context.Context) error {
+func (a *processorApp) startHealthWebHandler(ctx context.Context, db *jobsdb.Handle) error {
 	// Port where Processor health handler is running
-	pkgLogger.Infof("Starting in %d", webPort)
-	srvMux := mux.NewRouter()
-	srvMux.HandleFunc("/health", app.LivenessHandler(gatewayDB))
-	srvMux.HandleFunc("/", app.LivenessHandler(gatewayDB))
+	a.log.Infof("Starting in %d", a.config.http.webPort)
+	srvMux := chi.NewMux()
+	srvMux.HandleFunc("/health", app.LivenessHandler(db))
+	srvMux.HandleFunc("/", app.LivenessHandler(db))
 	srv := &http.Server{
-		Addr:              ":" + strconv.Itoa(webPort),
-		Handler:           bugsnag.Handler(srvMux),
-		ReadTimeout:       ReadTimeout,
-		ReadHeaderTimeout: ReadHeaderTimeout,
-		WriteTimeout:      WriteTimeout,
-		IdleTimeout:       IdleTimeout,
-		MaxHeaderBytes:    MaxHeaderBytes,
+		Addr:              ":" + strconv.Itoa(a.config.http.webPort),
+		Handler:           crash.Handler(srvMux),
+		ReadTimeout:       a.config.http.ReadTimeout,
+		ReadHeaderTimeout: a.config.http.ReadHeaderTimeout,
+		WriteTimeout:      a.config.http.WriteTimeout,
+		IdleTimeout:       a.config.http.IdleTimeout,
+		MaxHeaderBytes:    a.config.http.MaxHeaderBytes,
 	}
 
-	return httputil.ListenAndServe(ctx, srv)
+	return kithttputil.ListenAndServe(ctx, srv)
 }

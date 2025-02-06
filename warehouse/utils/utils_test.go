@@ -12,20 +12,143 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rudderlabs/rudder-server/utils/logger"
+	"github.com/rudderlabs/rudder-server/warehouse/internal/model"
+
+	"github.com/rudderlabs/rudder-go-kit/awsutil"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/rudderlabs/rudder-server/config"
-	"github.com/rudderlabs/rudder-server/utils/awsutils"
+	"github.com/rudderlabs/rudder-go-kit/config"
+
 	"github.com/rudderlabs/rudder-server/utils/misc"
 
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	. "github.com/rudderlabs/rudder-server/warehouse/utils"
 )
+
+func TestSanitizeJSON(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    json.RawMessage
+		expected json.RawMessage
+	}{
+		{
+			name:     "empty json",
+			input:    json.RawMessage(`{}`),
+			expected: json.RawMessage(`{}`),
+		},
+		{
+			name:     "with unicode characters",
+			input:    json.RawMessage(`{"exporting_data_failed":{"attempt":1,"errors":["Start: \u0000\u0000\u0000\u0000\u0000\u0000\u0000 : End"]}}`),
+			expected: json.RawMessage(`{"exporting_data_failed":{"attempt":1,"errors":["Start:  : End"]}}`),
+		},
+		{
+			name:     "without unicode characters",
+			input:    json.RawMessage(`{"exporting_data_failed":{"attempt":1,"errors":["Start:  : End"]}}`),
+			expected: json.RawMessage(`{"exporting_data_failed":{"attempt":1,"errors":["Start:  : End"]}}`),
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.expected, SanitizeJSON(tc.input))
+		})
+	}
+}
+
+func TestSanitizeString(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:  "empty string",
+			input: "",
+		},
+		{
+			name:     "with unicode characters",
+			input:    "Start: \u0000\u0000\u0000\u0000\u0000\u0000\u0000 : End",
+			expected: "Start:  : End",
+		},
+		{
+			name:     "without unicode characters",
+			input:    "Start:  : End",
+			expected: "Start:  : End",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.expected, SanitizeString(tc.input))
+		})
+	}
+}
+
+func TestFormatPemContent(t *testing.T) {
+	testCases := []struct {
+		name   string
+		input  string
+		output string
+	}{
+		{
+			name:   "certificate (textInput)",
+			input:  `-----BEGIN CERTIFICATE----- MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p -----END CERTIFICATE-----`,
+			output: "-----BEGIN CERTIFICATE-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p \n-----END CERTIFICATE-----\n",
+		},
+		{
+			name:   "certificate (textArea)",
+			input:  "-----BEGIN CERTIFICATE-----\nMIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS\npIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI\n/3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh\nCy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj\nI7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6\nU8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo\n0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt\nM7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE\nsZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O\njNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq\n8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa\nfQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM\nMazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun\nKPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa\nDj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75\nDLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss\nYV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4\njL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2\n+hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z\np1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU\nsomn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq\nyxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV\n8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD\n47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX\nELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E\nvYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt\nWVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn\nVd2oqQJsSntAE0KdZZSZCBTkx39xJEVS\n-----END CERTIFICATE-----",
+			output: "-----BEGIN CERTIFICATE-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS pIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI /3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh Cy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj I7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6 U8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo 0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt M7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE sZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O jNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq 8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa fQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM MazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun KPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa Dj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75 DLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss YV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4 jL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2 +hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z p1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU somn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq yxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV 8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD 47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX ELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E vYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt WVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn Vd2oqQJsSntAE0KdZZSZCBTkx39xJEVS \n-----END CERTIFICATE-----\n",
+		},
+		{
+			name:   "rsa private key (textInput)",
+			input:  `-----BEGIN RSA PRIVATE KEY----- MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p -----END RSA PRIVATE KEY-----`,
+			output: "-----BEGIN RSA PRIVATE KEY-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p \n-----END RSA PRIVATE KEY-----\n",
+		},
+		{
+			name:   "rsa private key (textArea)",
+			input:  "-----BEGIN RSA PRIVATE KEY-----\nMIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS\npIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI\n/3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh\nCy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj\nI7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6\nU8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo\n0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt\nM7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE\nsZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O\njNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq\n8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa\nfQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM\nMazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun\nKPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa\nDj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75\nDLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss\nYV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4\njL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2\n+hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z\np1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU\nsomn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq\nyxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV\n8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD\n47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX\nELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E\nvYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt\nWVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn\nVd2oqQJsSntAE0KdZZSZCBTkx39xJEVS\n-----END RSA PRIVATE KEY-----",
+			output: "-----BEGIN RSA PRIVATE KEY-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS pIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI /3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh Cy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj I7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6 U8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo 0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt M7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE sZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O jNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq 8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa fQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM MazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun KPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa Dj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75 DLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss YV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4 jL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2 +hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z p1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU somn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq yxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV 8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD 47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX ELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E vYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt WVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn Vd2oqQJsSntAE0KdZZSZCBTkx39xJEVS \n-----END RSA PRIVATE KEY-----\n",
+		},
+		{
+			name:   "encrypted private key (textInput)",
+			input:  `-----BEGIN ENCRYPTED PRIVATE KEY----- MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p -----END ENCRYPTED PRIVATE KEY-----`,
+			output: "-----BEGIN ENCRYPTED PRIVATE KEY-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p \n-----END ENCRYPTED PRIVATE KEY-----\n",
+		},
+		{
+			name:   "encrypted private key (textArea)",
+			input:  "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS\npIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI\n/3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh\nCy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj\nI7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6\nU8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo\n0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt\nM7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE\nsZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O\njNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq\n8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa\nfQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM\nMazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun\nKPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa\nDj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75\nDLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss\nYV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4\njL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2\n+hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z\np1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU\nsomn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq\nyxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV\n8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD\n47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX\nELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E\nvYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt\nWVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn\nVd2oqQJsSntAE0KdZZSZCBTkx39xJEVS\n-----END ENCRYPTED PRIVATE KEY-----",
+			output: "-----BEGIN ENCRYPTED PRIVATE KEY-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS pIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI /3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh Cy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj I7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6 U8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo 0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt M7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE sZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O jNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq 8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa fQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM MazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun KPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa Dj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75 DLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss YV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4 jL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2 +hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z p1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU somn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq yxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV 8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD 47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX ELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E vYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt WVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn Vd2oqQJsSntAE0KdZZSZCBTkx39xJEVS \n-----END ENCRYPTED PRIVATE KEY-----\n",
+		},
+		{
+			name:   "private key (textInput)",
+			input:  `-----BEGIN PRIVATE KEY----- MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p -----END PRIVATE KEY-----`,
+			output: "-----BEGIN PRIVATE KEY-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQ64IduEZCqZfR5Nix HyETFQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQILyNp24M/i6MEggTI xnr7+5ltJidFtjYBhUZJz0LxmQD+2PmH4D5a22lkewL22iLcdLuQbWdvGzXSaCmP IkhQ9k/KRrzda98IkUuZ3X3uqgvqeJjXh7nqCFahfTvZhfFaINkCqzowl03wB9Dn rKxIT9C7Z00m2CSdxL+cHSYAWl1GIn/d7j99bHWa/m7H5f3BuE/xStYJG1gHrC+g aB+dzZLDygiTYqc4SaTtHDBT1PeIJqiDQOgfKGF9vZKdtrfAjPlS2MI+s2AJHO3B h6zTMjhIrQ6RX/Y5gGm5DkVeuygP2unf8EBoOc5MOkeTb9hMqnKlBz2fumo/I5mu qo5DHk4EZpnqNymRaY0glp6bjd3vMj889kiZ2Rdtf4doieYuggwYBJ4WxpQ2GQAy RfGMcDOWHIwAe9p4+prgNet6Atvtp2YEH7LjXVvmNFTGbK6Jo+Fxp5n5B/3b54kB 6RFJa6JJz4YHHEU6w8woTanr/9W2urKncbQXQW5kUW2YBSCz3ZWHNr93AY9IVXa2 csAuAcQng/8coR2A20QJybntYLHUl1p0bZMM2XgaCeqD84p4F+COo6ehgJ7w8Sp9 MlwSXiGwQlgxKpjFL0o8X2Q45yPZUaWrbUsW+i9g3ckLR/i8RD4V6gqgsi9+QRF/ XsPS9lGki6FV8UxobNzlKFmEtDN8EiqUVn3zVmBCD1Klu+/Dua9cI6N22oq/woVI kqhJN+2NCGPl72levNQkb2CsmZ1Pv6CLwrsaDaRXFEA3em736qDmdiQ5pmLq6SDo G1awzPayzUkWgrJKyAnz9SZZmYvQSPbNS3Sk/zHEbhIR/yDxn0DmoP/wuXud+YvR rdOr9bvtYYGfkpi4mWYJWsoueFV+v4991evZRAzxge/2kKn2ONyk/hMSGSWBtwNq QPWFzss2kNiE97SsZ3v8AhOAiPSdjmhh6WOudN8PPox0mx+ulI8UxuMxP3hZP2jS JomlbMvIlf1Jmuzt/I4K7lP61llvQKqsl89bhYLnQyTG7WOoyEL+VmGwyWN+XECX 8zvclFqwzNOOHCMXVfcynB4kZCWeX9L997N8ivj4SiqQ9w0YG2tFaQ6yQUnPMs27 5qBaAz7eQVuGM8Y65fs5S0m+DsJ/PvzfrPoXsKroxFhTrGqtvRkqVt7Z9FxFXctk 2OQO7lf8WgW5jGG/mqPxZ5Q4M7YoSAlkPKbcbCvcLsrVXTr+/ghwnFsGKCDCR4QR pjTqeMxFPHWVhzeSTAmZ0Kbk5i7KUug89TFxfilJa/v4bhEKDm6pcnSorWSUJlhN xxkehZ1GCJdOGNAvKwQ6Gl+2q/W0f+cMT9z2nYB/3Hx4xnqCL4EXRxq0SkoCQDVW W5uMaPy/un6jV+2qrgnt8Sn2Z9Pc0TVo/N3yXGb4mkRFRTn1IPiZePDSHsZ20oXr 4WC403Iw0gs3X5eM/s1DGdi00gU5As8vYScaMQXb68Th+fFPfvc9o9lVfeHkiM/L KcbdeGWnYuc8lj1AVSEubiHLoFGvePk8jsDaWE8oaV4IhLTsU5x3Baj5rNUfqMZv MhFsjpTpmdbgroekHpP1hqeXp8/0TJ/1o96ublAqC5LJpfbYOVGeP3OJgx/ASmrp RA3rnyTeLSAN2KOdvaSyZxGmCxYMLu9p \n-----END PRIVATE KEY-----\n",
+		},
+		{
+			name:   "private key (textArea)",
+			input:  "-----BEGIN PRIVATE KEY-----\nMIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS\npIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI\n/3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh\nCy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj\nI7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6\nU8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo\n0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt\nM7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE\nsZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O\njNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq\n8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa\nfQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM\nMazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun\nKPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa\nDj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75\nDLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss\nYV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4\njL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2\n+hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z\np1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU\nsomn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq\nyxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV\n8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD\n47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX\nELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E\nvYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt\nWVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn\nVd2oqQJsSntAE0KdZZSZCBTkx39xJEVS\n-----END PRIVATE KEY-----",
+			output: "-----BEGIN PRIVATE KEY-----\n MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQpWee/aYJAeHHT9AS pIo+jQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQInSbkcxgNEisEggTI /3+KEvhVubn3GXS/w0QvJz0qR/gjgWSZ5e+c8U5DmVAyjzftS/QNFIX8ArYDwFUh Cy9wJEmbPRlcRloXTBsk5IMT0MYIa/4zGxfqPWfgdkxrJzS2sCQP+FwsgkSUEvYj I7UEJ8kxmfew30RCJRJlNdzYPg8HAYlVizyemWxhrnFT8HE4Len+ILJUN0HGfra6 U8pLI6MKnGRqLZBWIhc+2JJ/UqWQexVClN/gNV3xkC5CM7CsRsDRJw7bbWFwH2Eo 0VStFV3DVpjf++VnPoRlRi++3olXVxO1I2e+SR1fU0CVjzXE+Q+ltWJHiBsQ7kWt M7weOfvd1AxAYhM7HzHOyI5JyawaBUnc2PNqzrDv1AOU8HIOe1JCuvj4RWI//BpE sZmjjGBMRzTsorWMILaWFEnC5lefjd06Cmag5jsLoLrZeewqwix7+r8SYVptnl5O jNO9lZU83HJwH5W9TPHB7OCQPOMGqjAnIeDEwLPjBWGdylyf/BZamvoONG74f5kq 8I3bX4rxMM71vg6xWcS+MKKn/4ch3oIjuN+lUOVJH1G2wEROVzbQknWns6JM+Jsa fQjQh0YigdVwbHC99wCLtwVVXcmpA5Jj2z8wvqCYnb4MlaYt8Ld7hVaaF13tp9lM MazxIOIJmHuX4BB3wVFTCygHqKzEUczyMnjKfAKO1BL72ZYQAI9nbZmSUuXuvxun KPk6XqTxSJCjGHQxIFkEJVHT9qhxI5MUgdo6R+BVvPCxdo7Xnikw3DKij/BRlhWa Dj+WSAXH0Xvln/GownUCVACOY10dkFkUEpmvV3cKbSMBwGnp0aagFGKaP33O6R75 DLLzVv4/vhZQEIpUKjmwWNOYfZ5Yz5ndKJ6B3eFwYXoEQkCLiEOddP6A7Soeasss YV8jN00MUyFH9xTzvtIcsWeu5PYVcngE2vyGXkbrzWCs6vtaGQDNi7+HfzYGtKH4 jL+BHYwwxuSzn2ki1ondrtzP7+NNc6PUJfcs5/C0DwXK0ymAKlzEtxQk9infCMa2 +hCbeO1RwyqWT/pDDruVJZ2r/IcPag1rrqSPVYPz19RVxV1Td2TLlex6Nwa6JE7z p1cNpopxftrCz0Ajw4qIEJ9tP/ztZAiaf9dHHREKckMxSv41AcypVSIfpw5WTlwU somn5mbBX/r1M6F43fjEUh4NCPNBb80xu1Z1jP9AZulh1O/6Fj6jQXZVVuEOFJaq yxIy4ocLA7/1VpchZ0RpbvQpq2/I2N4H+Reqk5oodMZf0APiV3d6v3iN1YbVL0aV 8NODoCbs3IJBSaNgCjwfNyA4rtjBhup8doSJ/oTY30ZMX4uGZbpRLjJbUItK1IrD 47Hh2Ga3FhgIblMj9Fg9GqrPvU2PMplrWdbxWcpuV7klvKAx4zzDxiZiPQNqkvrX ELIqVf33GgggqmEqqNFXZDUXqSd5LIzsR7pEnaksIQ46jhQtP8WZLpkKlWTaDX2E vYQMhz9A0NT2hONOA9aLUCiyLvYjrYR9r7hhj5fpEDjOi8rIs/+NW/wrZhsJodPt WVJXx3MgHkN8tzJ40kEKBQlViQXxh2bSQjjP8WePRHX6rMmvIzWaJcOZk+lfrUGn Vd2oqQJsSntAE0KdZZSZCBTkx39xJEVS \n-----END PRIVATE KEY-----\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.output, FormatPemContent(tc.input))
+		})
+	}
+}
 
 func TestDestinationConfigKeys(t *testing.T) {
 	for _, whType := range WarehouseDestinations {
@@ -34,7 +157,7 @@ func TestDestinationConfigKeys(t *testing.T) {
 
 			whName := WHDestNameMap[whType]
 			configKey := fmt.Sprintf("Warehouse.%s.feature", whName)
-			got := config.ConfigKeyToEnv(configKey)
+			got := config.ConfigKeyToEnv(config.DefaultEnvPrefix, configKey)
 			expected := fmt.Sprintf("RSERVER_WAREHOUSE_%s_FEATURE", strings.ToUpper(whName))
 			require.Equal(t, got, expected)
 		})
@@ -212,13 +335,13 @@ func TestGetS3LocationFolder(t *testing.T) {
 }
 
 func TestGetS3Locations(t *testing.T) {
-	inputs := []LoadFileT{
+	inputs := []LoadFile{
 		{Location: "https://test-bucket.s3.amazonaws.com/test-object.csv"},
 		{Location: "https://test-bucket.s3.eu-west-1.amazonaws.com/test-object.csv"},
 		{Location: "https://my.test-bucket.s3.amazonaws.com/test-object.csv"},
 		{Location: "https://my.test-bucket.s3.us-west-1.amazonaws.com/test-object.csv"},
 	}
-	outputs := []LoadFileT{
+	outputs := []LoadFile{
 		{Location: "s3://test-bucket/test-object.csv"},
 		{Location: "s3://test-bucket/test-object.csv"},
 		{Location: "s3://my.test-bucket/test-object.csv"},
@@ -255,7 +378,7 @@ func TestGetGCSLocation(t *testing.T) {
 		},
 	}
 	for _, input := range inputs {
-		gcsLocation := GetGCSLocation(input.location, GCSLocationOptionsT{
+		gcsLocation := GetGCSLocation(input.location, GCSLocationOptions{
 			TLDFormat: input.format,
 		})
 		require.Equal(t, gcsLocation, input.gcsLocation)
@@ -277,13 +400,13 @@ func TestGetGCSLocationFolder(t *testing.T) {
 		},
 	}
 	for _, input := range inputs {
-		gcsLocationFolder := GetGCSLocationFolder(input.location, GCSLocationOptionsT{})
+		gcsLocationFolder := GetGCSLocationFolder(input.location, GCSLocationOptions{})
 		require.Equal(t, gcsLocationFolder, input.gcsLocationFolder)
 	}
 }
 
 func TestGetGCSLocations(t *testing.T) {
-	inputs := []LoadFileT{
+	inputs := []LoadFile{
 		{Location: "https://storage.googleapis.com/test-bucket/test-object.csv"},
 		{Location: "https://storage.googleapis.com/my.test-bucket/test-object.csv"},
 		{Location: "https://storage.googleapis.com/my.test-bucket2/test-object.csv"},
@@ -296,7 +419,7 @@ func TestGetGCSLocations(t *testing.T) {
 		"gs://my.test-bucket/test-object2.csv",
 	}
 
-	gcsLocations := GetGCSLocations(inputs, GCSLocationOptionsT{})
+	gcsLocations := GetGCSLocations(inputs, GCSLocationOptions{})
 	require.Equal(t, gcsLocations, outputs)
 }
 
@@ -333,6 +456,9 @@ func TestGetAzureBlobLocationFolder(t *testing.T) {
 }
 
 func TestToSafeNamespace(t *testing.T) {
+	config.Set("Warehouse.bigquery.skipNamespaceSnakeCasing", true)
+	defer config.Reset()
+
 	inputs := []struct {
 		provider      string
 		namespace     string
@@ -386,6 +512,16 @@ func TestToSafeNamespace(t *testing.T) {
 			provider:      "RS",
 			namespace:     "group",
 			safeNamespace: "_group",
+		},
+		{
+			provider:      "RS",
+			namespace:     "k3_namespace",
+			safeNamespace: "k_3_namespace",
+		},
+		{
+			provider:      "BQ",
+			namespace:     "k3_namespace",
+			safeNamespace: "k3_namespace",
 		},
 	}
 	for _, input := range inputs {
@@ -495,75 +631,12 @@ func TestDoubleQuoteAndJoinByComma(t *testing.T) {
 }
 
 func TestSortColumnKeysFromColumnMap(t *testing.T) {
-	columnMap := map[string]string{"k5": "V5", "k4": "V4", "k3": "V3", "k2": "V2", "k1": "V1"}
+	columnMap := model.TableSchema{"k5": "V5", "k4": "V4", "k3": "V3", "k2": "V2", "k1": "V1"}
 	want := []string{"k1", "k2", "k3", "k4", "k5"}
 	got := SortColumnKeysFromColumnMap(columnMap)
 	require.Equal(t, got, want)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %#v want %#v input %#v", got, want, columnMap)
-	}
-}
-
-func TestGetLoadFileGenTime(t *testing.T) {
-	inputs := []struct {
-		timingsMap        sql.NullString
-		loadFilesEpochStr string
-	}{
-		{
-			timingsMap: sql.NullString{
-				String: "[{\"generating_upload_schema\":\"2022-07-04T16:09:03.001Z\"},{\"generated_upload_schema\":\"2022-07-04T16:09:04.141Z\"},{\"creating_table_uploads\":\"2022-07-04T16:09:04.144Z\"},{\"created_table_uploads\":\"2022-07-04T16:09:04.164Z\"},{\"generating_load_files\":\"2022-07-04T16:09:04.169Z\"},{\"generated_load_files\":\"2022-07-04T16:09:40.957Z\"},{\"updating_table_uploads_counts\":\"2022-07-04T16:09:40.959Z\"},{\"updated_table_uploads_counts\":\"2022-07-04T16:09:41.916Z\"},{\"creating_remote_schema\":\"2022-07-04T16:09:41.918Z\"},{\"created_remote_schema\":\"2022-07-04T16:09:41.920Z\"},{\"exporting_data\":\"2022-07-04T16:09:41.922Z\"},{\"exporting_data_failed\":\"2022-07-04T17:14:24.424Z\"}]",
-			},
-			loadFilesEpochStr: "2022-07-04T16:09:04.169Z",
-		},
-		{
-			timingsMap: sql.NullString{
-				String: "[]",
-			},
-			loadFilesEpochStr: "0001-01-01T00:00:00.000Z",
-		},
-		{
-			timingsMap: sql.NullString{
-				String: "[{\"generating_upload_schema\":\"2022-07-04T16:09:03.001Z\"},{\"generated_upload_schema\":\"2022-07-04T16:09:04.141Z\"},{\"creating_table_uploads\":\"2022-07-04T16:09:04.144Z\"},{\"created_table_uploads\":\"2022-07-04T16:09:04.164Z\"}]",
-			},
-			loadFilesEpochStr: "0001-01-01T00:00:00.000Z",
-		},
-	}
-	for _, input := range inputs {
-		loadFilesEpochTime, err := time.Parse(misc.RFC3339Milli, input.loadFilesEpochStr)
-		require.NoError(t, err)
-
-		loadFileGenTime := GetLoadFileGenTime(input.timingsMap)
-		require.Equal(t, loadFilesEpochTime, loadFileGenTime)
-	}
-}
-
-func TestGetLastFailedStatus(t *testing.T) {
-	inputs := []struct {
-		timingsMap sql.NullString
-		status     string
-	}{
-		{
-			timingsMap: sql.NullString{
-				String: "[{\"generating_upload_schema\":\"2022-07-04T16:09:03.001Z\"},{\"generated_upload_schema\":\"2022-07-04T16:09:04.141Z\"},{\"creating_table_uploads\":\"2022-07-04T16:09:04.144Z\"},{\"created_table_uploads\":\"2022-07-04T16:09:04.164Z\"},{\"generating_load_files\":\"2022-07-04T16:09:04.169Z\"},{\"generated_load_files\":\"2022-07-04T16:09:40.957Z\"},{\"updating_table_uploads_counts\":\"2022-07-04T16:09:40.959Z\"},{\"updated_table_uploads_counts\":\"2022-07-04T16:09:41.916Z\"},{\"creating_remote_schema\":\"2022-07-04T16:09:41.918Z\"},{\"created_remote_schema\":\"2022-07-04T16:09:41.920Z\"},{\"exporting_data\":\"2022-07-04T16:09:41.922Z\"},{\"exporting_data_failed\":\"2022-07-04T17:14:24.424Z\"}]",
-			},
-			status: "exporting_data_failed",
-		},
-		{
-			timingsMap: sql.NullString{
-				String: "[]",
-			},
-			status: "",
-		},
-		{
-			timingsMap: sql.NullString{
-				String: "[{\"generating_upload_schema\":\"2022-07-04T16:09:03.001Z\"},{\"generated_upload_schema\":\"2022-07-04T16:09:04.141Z\"},{\"creating_table_uploads\":\"2022-07-04T16:09:04.144Z\"},{\"created_table_uploads\":\"2022-07-04T16:09:04.164Z\"}]",
-			},
-			status: "",
-		},
-	}
-	for _, input := range inputs {
-		status := GetLastFailedStatus(input.timingsMap)
-		require.Equal(t, status, input.status)
 	}
 }
 
@@ -595,113 +668,6 @@ func TestTimingFromJSONString(t *testing.T) {
 		status, recordedTime := TimingFromJSONString(input.timingsMap)
 		require.Equal(t, status, input.status)
 		require.Equal(t, loadFilesEpochTime, recordedTime)
-	}
-}
-
-func TestGetConfigValue(t *testing.T) {
-	inputs := []struct {
-		key       string
-		value     string
-		warehouse Warehouse
-	}{
-		{
-			key:   "k1",
-			value: "v1",
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"k1": "v1",
-					},
-				},
-			},
-		},
-		{
-			key: "u1",
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{},
-				},
-			},
-		},
-	}
-	for _, input := range inputs {
-		value := GetConfigValue(input.key, input.warehouse)
-		require.Equal(t, value, input.value)
-	}
-}
-
-func TestGetConfigValueBoolString(t *testing.T) {
-	inputs := []struct {
-		key       string
-		value     string
-		warehouse Warehouse
-	}{
-		{
-			key:   "k1",
-			value: "true",
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"k1": true,
-					},
-				},
-			},
-		},
-		{
-			key:   "k1",
-			value: "false",
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"k1": false,
-					},
-				},
-			},
-		},
-		{
-			key:   "u1",
-			value: "false",
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{},
-				},
-			},
-		},
-	}
-	for _, input := range inputs {
-		value := GetConfigValueBoolString(input.key, input.warehouse)
-		require.Equal(t, value, input.value)
-	}
-}
-
-func TestGetConfigValueAsMap(t *testing.T) {
-	inputs := []struct {
-		key    string
-		value  map[string]interface{}
-		config map[string]interface{}
-	}{
-		{
-			key: "map",
-			value: map[string]interface{}{
-				"k1": "v1",
-			},
-			config: map[string]interface{}{
-				"map": map[string]interface{}{
-					"k1": "v1",
-				},
-			},
-		},
-		{
-			key:    "map",
-			value:  map[string]interface{}{},
-			config: map[string]interface{}{},
-		},
-	}
-	for idx, input := range inputs {
-		value := GetConfigValueAsMap(input.key, input.config)
-		if !reflect.DeepEqual(value, input.value) {
-			t.Errorf("got %q want %q input %d", value, input.value, idx)
-		}
 	}
 }
 
@@ -851,7 +817,7 @@ func TestObjectStorageType(t *testing.T) {
 }
 
 func TestGetTablePathInObjectStorage(t *testing.T) {
-	require.NoError(t, os.Setenv("WAREHOUSE_DATALAKE_FOLDER_NAME", "rudder-test-payload"))
+	t.Setenv("WAREHOUSE_DATALAKE_FOLDER_NAME", "rudder-test-payload")
 	inputs := []struct {
 		namespace string
 		tableName string
@@ -899,7 +865,7 @@ func TestGetTempFileExtension(t *testing.T) {
 			expected: "csv.gz",
 		},
 		{
-			destType: AZURE_SYNAPSE,
+			destType: AzureSynapse,
 			expected: "csv.gz",
 		},
 		{
@@ -907,15 +873,15 @@ func TestGetTempFileExtension(t *testing.T) {
 			expected: "csv.gz",
 		},
 		{
-			destType: S3_DATALAKE,
+			destType: S3Datalake,
 			expected: "csv.gz",
 		},
 		{
-			destType: GCS_DATALAKE,
+			destType: GCSDatalake,
 			expected: "csv.gz",
 		},
 		{
-			destType: AZURE_DATALAKE,
+			destType: AzureDatalake,
 			expected: "csv.gz",
 		},
 	}
@@ -925,77 +891,19 @@ func TestGetTempFileExtension(t *testing.T) {
 	}
 }
 
-func TestGetLoadFilePrefix(t *testing.T) {
-	inputs := []struct {
-		warehouse Warehouse
-		expected  string
-	}{
-		{
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"tableSuffix": "key=val",
-					},
-				},
-				Type: S3_DATALAKE,
-			},
-			expected: "2022/08/06/14",
-		},
-		{
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"tableSuffix": "key=val",
-					},
-				},
-				Type: AZURE_DATALAKE,
-			},
-			expected: "2022/08/06/14",
-		},
-		{
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"tableSuffix": "key=val",
-					},
-				},
-				Type: GCS_DATALAKE,
-			},
-			expected: "key=val/2022/08/06/14",
-		},
-		{
-			warehouse: Warehouse{
-				Destination: backendconfig.DestinationT{
-					Config: map[string]interface{}{
-						"tableSuffix":      "key=val",
-						"timeWindowLayout": "year=2006/month=01/day=02/hour=15",
-					},
-				},
-				Type: GCS_DATALAKE,
-			},
-			expected: "key=val/year=2022/month=08/day=06/hour=14",
-		},
-	}
-	for _, input := range inputs {
-		timeWindow := time.Date(2022, time.Month(8), 6, 14, 10, 30, 0, time.UTC)
-		got := GetLoadFilePrefix(timeWindow, input.warehouse)
-		require.Equal(t, got, input.expected)
-	}
-}
-
 func TestWarehouseT_GetBoolDestinationConfig(t *testing.T) {
 	inputs := []struct {
-		warehouse Warehouse
+		warehouse model.Warehouse
 		expected  bool
 	}{
 		{
-			warehouse: Warehouse{
+			warehouse: model.Warehouse{
 				Destination: backendconfig.DestinationT{},
 			},
 			expected: false,
 		},
 		{
-			warehouse: Warehouse{
+			warehouse: model.Warehouse{
 				Destination: backendconfig.DestinationT{
 					Config: map[string]interface{}{},
 				},
@@ -1003,30 +911,30 @@ func TestWarehouseT_GetBoolDestinationConfig(t *testing.T) {
 			expected: false,
 		},
 		{
-			warehouse: Warehouse{
+			warehouse: model.Warehouse{
 				Destination: backendconfig.DestinationT{
 					Config: map[string]interface{}{
-						"k1": "true",
+						"useRudderStorage": "true",
 					},
 				},
 			},
 			expected: false,
 		},
 		{
-			warehouse: Warehouse{
+			warehouse: model.Warehouse{
 				Destination: backendconfig.DestinationT{
 					Config: map[string]interface{}{
-						"k1": false,
+						"useRudderStorage": false,
 					},
 				},
 			},
 			expected: false,
 		},
 		{
-			warehouse: Warehouse{
+			warehouse: model.Warehouse{
 				Destination: backendconfig.DestinationT{
 					Config: map[string]interface{}{
-						"k1": true,
+						"useRudderStorage": true,
 					},
 				},
 			},
@@ -1034,7 +942,7 @@ func TestWarehouseT_GetBoolDestinationConfig(t *testing.T) {
 		},
 	}
 	for idx, input := range inputs {
-		got := input.warehouse.GetBoolDestinationConfig("k1")
+		got := input.warehouse.GetBoolDestinationConfig(model.UseRudderStorageSetting)
 		want := input.expected
 		if got != want {
 			t.Errorf("got %t expected %t input %d", got, want, idx)
@@ -1072,7 +980,7 @@ func TestGetLoadFileFormat(t *testing.T) {
 			expected: "csv.gz",
 		},
 		{
-			whType:   AZURE_SYNAPSE,
+			whType:   AzureSynapse,
 			expected: "csv.gz",
 		},
 		{
@@ -1080,20 +988,20 @@ func TestGetLoadFileFormat(t *testing.T) {
 			expected: "csv.gz",
 		},
 		{
-			whType:   S3_DATALAKE,
+			whType:   S3Datalake,
 			expected: "parquet",
 		},
 		{
-			whType:   GCS_DATALAKE,
+			whType:   GCSDatalake,
 			expected: "parquet",
 		},
 		{
-			whType:   AZURE_DATALAKE,
+			whType:   AzureDatalake,
 			expected: "parquet",
 		},
 	}
 	for _, input := range inputs {
-		got := GetLoadFileFormat(input.whType)
+		got := GetLoadFileFormat(GetLoadFileType(input.whType))
 		require.Equal(t, got, input.expected)
 	}
 }
@@ -1128,7 +1036,7 @@ func TestGetLoadFileType(t *testing.T) {
 			expected: "csv",
 		},
 		{
-			whType:   AZURE_SYNAPSE,
+			whType:   AzureSynapse,
 			expected: "csv",
 		},
 		{
@@ -1136,15 +1044,15 @@ func TestGetLoadFileType(t *testing.T) {
 			expected: "csv",
 		},
 		{
-			whType:   S3_DATALAKE,
+			whType:   S3Datalake,
 			expected: "parquet",
 		},
 		{
-			whType:   GCS_DATALAKE,
+			whType:   GCSDatalake,
 			expected: "parquet",
 		},
 		{
-			whType:   AZURE_DATALAKE,
+			whType:   AzureDatalake,
 			expected: "parquet",
 		},
 	}
@@ -1204,7 +1112,7 @@ func TestCreateAWSSessionConfig(t *testing.T) {
 	inputs := []struct {
 		destination    *backendconfig.DestinationT
 		service        string
-		expectedConfig *awsutils.SessionConfig
+		expectedConfig *awsutil.SessionConfig
 	}{
 		{
 			destination: &backendconfig.DestinationT{
@@ -1213,7 +1121,7 @@ func TestCreateAWSSessionConfig(t *testing.T) {
 				},
 			},
 			service: "s3",
-			expectedConfig: &awsutils.SessionConfig{
+			expectedConfig: &awsutil.SessionConfig{
 				AccessKeyID: rudderAccessKeyID,
 				AccessKey:   rudderAccessKey,
 				Service:     "s3",
@@ -1227,7 +1135,7 @@ func TestCreateAWSSessionConfig(t *testing.T) {
 				},
 			},
 			service: "glue",
-			expectedConfig: &awsutils.SessionConfig{
+			expectedConfig: &awsutil.SessionConfig{
 				AccessKeyID: someAccessKeyID,
 				AccessKey:   someAccessKey,
 				Service:     "glue",
@@ -1241,7 +1149,7 @@ func TestCreateAWSSessionConfig(t *testing.T) {
 				WorkspaceID: someWorkspaceID,
 			},
 			service: "redshift",
-			expectedConfig: &awsutils.SessionConfig{
+			expectedConfig: &awsutil.SessionConfig{
 				RoleBasedAuth: true,
 				IAMRoleARN:    someIAMRoleARN,
 				ExternalID:    someWorkspaceID,
@@ -1254,7 +1162,7 @@ func TestCreateAWSSessionConfig(t *testing.T) {
 				WorkspaceID: someWorkspaceID,
 			},
 			service: "redshift",
-			expectedConfig: &awsutils.SessionConfig{
+			expectedConfig: &awsutil.SessionConfig{
 				AccessKeyID: rudderAccessKeyID,
 				AccessKey:   rudderAccessKey,
 				Service:     "redshift",
@@ -1269,28 +1177,20 @@ func TestCreateAWSSessionConfig(t *testing.T) {
 }
 
 var _ = Describe("Utils", func() {
-	DescribeTable("Get columns from table schema", func(schema TableSchemaT, expected []string) {
+	DescribeTable("Get columns from table schema", func(schema model.TableSchema, expected []string) {
 		columns := GetColumnsFromTableSchema(schema)
 		sort.Strings(columns)
 		sort.Strings(expected)
 		Expect(columns).To(Equal(expected))
 	},
-		Entry(nil, TableSchemaT{"k1": "v1", "k2": "v2"}, []string{"k1", "k2"}),
-		Entry(nil, TableSchemaT{"k2": "v1", "k1": "v2"}, []string{"k2", "k1"}),
+		Entry(nil, model.TableSchema{"k1": "v1", "k2": "v2"}, []string{"k1", "k2"}),
+		Entry(nil, model.TableSchema{"k2": "v1", "k1": "v2"}, []string{"k2", "k1"}),
 	)
 
-	DescribeTable("JSON schema to Map", func(rawMsg json.RawMessage, expected map[string]map[string]string) {
+	DescribeTable("JSON schema to Map", func(rawMsg json.RawMessage, expected model.Schema) {
 		Expect(JSONSchemaToMap(rawMsg)).To(Equal(expected))
 	},
-		Entry(nil, json.RawMessage(`{"k1": { "k2": "v2" }}`), map[string]map[string]string{"k1": {"k2": "v2"}}),
-	)
-
-	DescribeTable("Get date range list", func(start, end time.Time, format string, expected []string) {
-		Expect(GetDateRangeList(start, end, format)).To(Equal(expected))
-	},
-		Entry("Same day", time.Now(), time.Now(), "2006-01-02", []string{time.Now().Format("2006-01-02")}),
-		Entry("Multiple days", time.Now(), time.Now().AddDate(0, 0, 1), "2006-01-02", []string{time.Now().Format("2006-01-02"), time.Now().AddDate(0, 0, 1).Format("2006-01-02")}),
-		Entry("No days", nil, nil, "2006-01-02", nil),
+		Entry(nil, json.RawMessage(`{"k1": { "k2": "v2" }}`), model.Schema{"k1": {"k2": "v2"}}),
 	)
 
 	DescribeTable("Staging table prefix", func(provider string) {
@@ -1302,11 +1202,11 @@ var _ = Describe("Utils", func() {
 		Entry(nil, POSTGRES),
 		Entry(nil, CLICKHOUSE),
 		Entry(nil, MSSQL),
-		Entry(nil, AZURE_SYNAPSE),
+		Entry(nil, AzureSynapse),
 		Entry(nil, DELTALAKE),
-		Entry(nil, S3_DATALAKE),
-		Entry(nil, GCS_DATALAKE),
-		Entry(nil, AZURE_DATALAKE),
+		Entry(nil, S3Datalake),
+		Entry(nil, GCSDatalake),
+		Entry(nil, AzureDatalake),
 	)
 
 	DescribeTable("Staging table name", func(provider string, limit int) {
@@ -1326,29 +1226,29 @@ var _ = Describe("Utils", func() {
 		Entry(nil, POSTGRES, 63),
 		Entry(nil, CLICKHOUSE, 127),
 		Entry(nil, MSSQL, 127),
-		Entry(nil, AZURE_SYNAPSE, 127),
+		Entry(nil, AzureSynapse, 127),
 		Entry(nil, DELTALAKE, 127),
-		Entry(nil, S3_DATALAKE, 127),
-		Entry(nil, GCS_DATALAKE, 127),
-		Entry(nil, AZURE_DATALAKE, 127),
+		Entry(nil, S3Datalake, 127),
+		Entry(nil, GCSDatalake, 127),
+		Entry(nil, AzureDatalake, 127),
 	)
 
-	DescribeTable("Identity mapping unique mapping constraints name", func(warehouse Warehouse, expected string) {
+	DescribeTable("Identity mapping unique mapping constraints name", func(warehouse model.Warehouse, expected string) {
 		Expect(IdentityMappingsUniqueMappingConstraintName(warehouse)).To(Equal(expected))
 	},
-		Entry(nil, Warehouse{Namespace: "namespace", Destination: backendconfig.DestinationT{ID: "id"}}, "unique_merge_property_namespace_id"),
+		Entry(nil, model.Warehouse{Namespace: "namespace", Destination: backendconfig.DestinationT{ID: "id"}}, "unique_merge_property_namespace_id"),
 	)
 
-	DescribeTable("Identity mapping table name", func(warehouse Warehouse, expected string) {
+	DescribeTable("Identity mapping table name", func(warehouse model.Warehouse, expected string) {
 		Expect(IdentityMappingsTableName(warehouse)).To(Equal(expected))
 	},
-		Entry(nil, Warehouse{Namespace: "namespace", Destination: backendconfig.DestinationT{ID: "id"}}, "rudder_identity_mappings_namespace_id"),
+		Entry(nil, model.Warehouse{Namespace: "namespace", Destination: backendconfig.DestinationT{ID: "id"}}, "rudder_identity_mappings_namespace_id"),
 	)
 
-	DescribeTable("Identity merge rules table name", func(warehouse Warehouse, expected string) {
+	DescribeTable("Identity merge rules table name", func(warehouse model.Warehouse, expected string) {
 		Expect(IdentityMergeRulesTableName(warehouse)).To(Equal(expected))
 	},
-		Entry(nil, Warehouse{Namespace: "namespace", Destination: backendconfig.DestinationT{ID: "id"}}, "rudder_identity_merge_rules_namespace_id"),
+		Entry(nil, model.Warehouse{Namespace: "namespace", Destination: backendconfig.DestinationT{ID: "id"}}, "rudder_identity_merge_rules_namespace_id"),
 	)
 
 	DescribeTable("Identity merge rules warehouse table name", func(provider string) {
@@ -1360,11 +1260,11 @@ var _ = Describe("Utils", func() {
 		Entry(nil, POSTGRES),
 		Entry(nil, CLICKHOUSE),
 		Entry(nil, MSSQL),
-		Entry(nil, AZURE_SYNAPSE),
+		Entry(nil, AzureSynapse),
 		Entry(nil, DELTALAKE),
-		Entry(nil, S3_DATALAKE),
-		Entry(nil, GCS_DATALAKE),
-		Entry(nil, AZURE_DATALAKE),
+		Entry(nil, S3Datalake),
+		Entry(nil, GCSDatalake),
+		Entry(nil, AzureDatalake),
 	)
 
 	DescribeTable("Identity mappings warehouse table name", func(provider string) {
@@ -1376,11 +1276,11 @@ var _ = Describe("Utils", func() {
 		Entry(nil, POSTGRES),
 		Entry(nil, CLICKHOUSE),
 		Entry(nil, MSSQL),
-		Entry(nil, AZURE_SYNAPSE),
+		Entry(nil, AzureSynapse),
 		Entry(nil, DELTALAKE),
-		Entry(nil, S3_DATALAKE),
-		Entry(nil, GCS_DATALAKE),
-		Entry(nil, AZURE_DATALAKE),
+		Entry(nil, S3Datalake),
+		Entry(nil, GCSDatalake),
+		Entry(nil, AzureDatalake),
 	)
 
 	DescribeTable("Get object name", func(location string, config interface{}, objectProvider, objectName string) {
@@ -1388,7 +1288,7 @@ var _ = Describe("Utils", func() {
 	},
 		Entry(GCS, "https://storage.googleapis.com/bucket-name/key", map[string]interface{}{"bucketName": "bucket-name"}, GCS, "key"),
 		Entry(S3, "https://bucket-name.s3.amazonaws.com/key", map[string]interface{}{"bucketName": "bucket-name"}, S3, "key"),
-		Entry(AZURE_BLOB, "https://account-name.blob.core.windows.net/container-name/key", map[string]interface{}{"containerName": "container-name"}, AZURE_BLOB, "key"),
+		Entry(AzureBlob, "https://account-name.blob.core.windows.net/container-name/key", map[string]interface{}{"containerName": "container-name"}, AzureBlob, "key"),
 		Entry(MINIO, "https://minio-endpoint/bucket-name/key", map[string]interface{}{"bucketName": "bucket-name", "useSSL": true, "endPoint": "minio-endpoint"}, MINIO, "key"),
 	)
 

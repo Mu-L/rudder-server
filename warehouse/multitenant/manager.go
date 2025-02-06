@@ -5,19 +5,14 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/rudderlabs/rudder-server/config"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-go-kit/config"
+
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 )
 
-var degradedWorkspaceIDs []string
-
-func init() {
-	config.RegisterStringSliceConfigVariable(nil, &degradedWorkspaceIDs, false, "Warehouse.degradedWorkspaceIDs")
-}
-
 type Manager struct {
-	BackendConfig        backendconfig.BackendConfig
-	DegradedWorkspaceIDs []string
+	backendConfig        backendconfig.BackendConfig
+	degradedWorkspaceIDs []string
 
 	sourceIDToWorkspaceID map[string]string
 	excludeWorkspaceIDMap map[string]struct{}
@@ -28,16 +23,20 @@ type Manager struct {
 	initOnce  sync.Once
 }
 
+func New(conf *config.Config, bcConfig backendconfig.BackendConfig) *Manager {
+	m := &Manager{}
+	m.backendConfig = bcConfig
+	m.degradedWorkspaceIDs = conf.GetStringSlice("Warehouse.degradedWorkspaceIDs", nil)
+
+	return m
+}
+
 func (m *Manager) init() {
 	m.initOnce.Do(func() {
-		if m.DegradedWorkspaceIDs == nil {
-			m.DegradedWorkspaceIDs = degradedWorkspaceIDs
-		}
-
 		m.sourceIDToWorkspaceID = make(map[string]string)
 		m.excludeWorkspaceIDMap = make(map[string]struct{})
 
-		for _, workspaceID := range m.DegradedWorkspaceIDs {
+		for _, workspaceID := range m.degradedWorkspaceIDs {
 			m.excludeWorkspaceIDMap[workspaceID] = struct{}{}
 		}
 		m.ready = make(chan struct{})
@@ -48,12 +47,12 @@ func (m *Manager) init() {
 func (m *Manager) Run(ctx context.Context) {
 	m.init()
 
-	chIn := m.BackendConfig.Subscribe(ctx, backendconfig.TopicBackendConfig)
+	chIn := m.backendConfig.Subscribe(ctx, backendconfig.TopicBackendConfig)
 	for data := range chIn {
 		m.sourceMu.Lock()
-		config := data.Data.(map[string]backendconfig.ConfigT)
-		for workspaceID := range config {
-			for _, source := range config[workspaceID].Sources {
+		wConfig := data.Data.(map[string]backendconfig.ConfigT)
+		for workspaceID := range wConfig {
+			for _, source := range wConfig[workspaceID].Sources {
 				m.sourceIDToWorkspaceID[source.ID] = workspaceID
 			}
 		}
@@ -72,11 +71,11 @@ func (m *Manager) DegradedWorkspace(workspaceID string) bool {
 	return ok
 }
 
-// DegradedWorkspaceIDs returns a list of degraded workspaceIDs.
+// DegradedWorkspaces returns a list of degraded workspaceIDs.
 func (m *Manager) DegradedWorkspaces() []string {
 	m.init()
 
-	return m.DegradedWorkspaceIDs
+	return m.degradedWorkspaceIDs
 }
 
 // SourceToWorkspace returns the workspaceID for a given sourceID, even if workspaceID is degraded.
@@ -109,7 +108,7 @@ func (m *Manager) SourceToWorkspace(ctx context.Context, sourceID string) (strin
 func (m *Manager) WatchConfig(ctx context.Context) <-chan map[string]backendconfig.ConfigT {
 	m.init()
 
-	chIn := m.BackendConfig.Subscribe(ctx, backendconfig.TopicBackendConfig)
+	chIn := m.backendConfig.Subscribe(ctx, backendconfig.TopicBackendConfig)
 
 	chOut := make(chan map[string]backendconfig.ConfigT)
 

@@ -11,18 +11,20 @@ import (
 	"strings"
 	"testing"
 
-	gomock "github.com/golang/mock/gomock"
-	mock_logger "github.com/rudderlabs/rudder-server/mocks/utils/logger"
+	"go.uber.org/mock/gomock"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/rudderlabs/rudder-go-kit/logger/mock_logger"
 	"github.com/rudderlabs/rudder-server/services/rsources"
 	rsources_http "github.com/rudderlabs/rudder-server/services/rsources/http"
-	"github.com/stretchr/testify/require"
 )
 
-func TestDelete(t *testing.T) {
+func TestDeleteJobStatus(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	service := rsources.NewMockJobService(mockCtrl)
-	handler := rsources_http.NewHandler(service, mock_logger.NewMockLogger(mockCtrl))
+	handler := rsources_http.NewV2Handler(service, mock_logger.NewMockLogger(mockCtrl))
 
 	tests := []struct {
 		name                 string
@@ -37,18 +39,36 @@ func TestDelete(t *testing.T) {
 			name:                 "basic test",
 			jobRunId:             "123",
 			jobFilter:            rsources.JobFilter{},
-			endpoint:             prepURL("/v1/job-status/{job_run_id}", "123"),
-			method:               "DELETE",
-			expectedResponseCode: 204,
+			endpoint:             prepURL("/{job_run_id}", "123"),
+			method:               http.MethodDelete,
+			expectedResponseCode: http.StatusNoContent,
 		},
 		{
 			name:                 "service returns error test",
 			jobRunId:             "123",
 			jobFilter:            rsources.JobFilter{},
-			endpoint:             prepURL("/v1/job-status/{job_run_id}", "123"),
-			method:               "DELETE",
-			expectedResponseCode: 500,
+			endpoint:             prepURL("/{job_run_id}", "123"),
+			method:               http.MethodDelete,
+			expectedResponseCode: http.StatusInternalServerError,
 			serviceReturnError:   fmt.Errorf("something when wrong"),
+		},
+		{
+			name:                 "job run id doesn't exist",
+			jobRunId:             "invalid",
+			jobFilter:            rsources.JobFilter{},
+			endpoint:             prepURL("/{job_run_id}", "invalid"),
+			method:               http.MethodDelete,
+			expectedResponseCode: http.StatusNotFound,
+			serviceReturnError:   rsources.ErrStatusNotFound,
+		},
+		{
+			name:                 "job's source is incomplete",
+			jobRunId:             "123",
+			jobFilter:            rsources.JobFilter{},
+			endpoint:             prepURL("/{job_run_id}", "123"),
+			method:               http.MethodDelete,
+			expectedResponseCode: http.StatusBadRequest,
+			serviceReturnError:   rsources.ErrSourceNotCompleted,
 		},
 	}
 
@@ -69,7 +89,7 @@ func TestDelete(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			queryParams := toQueryParams(tt.jobFilter)
 			t.Log("endpoint tested:", tt.endpoint+queryParams)
-			service.EXPECT().Delete(gomock.Any(), tt.jobRunId, tt.jobFilter).Return(tt.serviceReturnError).Times(1)
+			service.EXPECT().DeleteJobStatus(gomock.Any(), tt.jobRunId, tt.jobFilter).Return(tt.serviceReturnError).Times(1)
 
 			url := fmt.Sprintf("http://localhost:8080%s%s", tt.endpoint, queryParams)
 			req, err := http.NewRequest(tt.method, url, http.NoBody)
@@ -90,7 +110,7 @@ func TestGetStatus(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	service := rsources.NewMockJobService(mockCtrl)
-	handler := rsources_http.NewHandler(service, mock_logger.NewMockLogger(mockCtrl))
+	handler := rsources_http.NewV1Handler(service, mock_logger.NewMockLogger(mockCtrl))
 
 	tests := []struct {
 		name                 string
@@ -106,7 +126,7 @@ func TestGetStatus(t *testing.T) {
 		{
 			name:                 "basic test - get status success",
 			jobID:                "123",
-			endpoint:             prepURL("/v1/job-status/{job_run_id}", "123"),
+			endpoint:             prepURL("/{job_run_id}", "123"),
 			method:               "GET",
 			expectedResponseCode: 200,
 			filter: map[string][]string{
@@ -173,7 +193,7 @@ func TestGetStatus(t *testing.T) {
 		{
 			name:                 "basic test - GetStatus fails with StatusNotFoundError",
 			jobID:                "123",
-			endpoint:             prepURL("/v1/job-status/{job_run_id}", "123"),
+			endpoint:             prepURL("/{job_run_id}", "123"),
 			method:               "GET",
 			expectedResponseCode: http.StatusNotFound,
 			filter: map[string][]string{
@@ -181,13 +201,13 @@ func TestGetStatus(t *testing.T) {
 				"source_id":   {"s1"},
 			},
 			jobStatus:      rsources.JobStatus{},
-			getStatusError: rsources.StatusNotFoundError,
+			getStatusError: rsources.ErrStatusNotFound,
 			respBody:       statusNotFoundError,
 		},
 		{
 			name:                 "basic test - GetStatus fails with internal server error",
 			jobID:                "123",
-			endpoint:             prepURL("/v1/job-status/{job_run_id}", "123"),
+			endpoint:             prepURL("/{job_run_id}", "123"),
 			method:               "GET",
 			expectedResponseCode: 500,
 			filter: map[string][]string{
@@ -224,11 +244,80 @@ func TestGetStatus(t *testing.T) {
 	}
 }
 
-func TestGetFailedRecords(t *testing.T) {
+func TestDeleteFailedRecords(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	service := rsources.NewMockJobService(mockCtrl)
-	handler := rsources_http.NewHandler(service, mock_logger.NewMockLogger(mockCtrl))
+	handler := rsources_http.NewV2Handler(service, mock_logger.NewMockLogger(mockCtrl))
+
+	tests := []struct {
+		name                 string
+		jobRunId             string
+		jobFilter            rsources.JobFilter
+		endpoint             string
+		method               string
+		expectedResponseCode int
+		serviceReturnError   error
+	}{
+		{
+			name:                 "basic test",
+			jobRunId:             "123",
+			jobFilter:            rsources.JobFilter{},
+			endpoint:             prepURL("/{job_run_id}/failed-records", "123"),
+			method:               http.MethodDelete,
+			expectedResponseCode: http.StatusNoContent,
+		},
+		{
+			name:                 "service returns error test",
+			jobRunId:             "123",
+			jobFilter:            rsources.JobFilter{},
+			endpoint:             prepURL("/{job_run_id}/failed-records", "123"),
+			method:               http.MethodDelete,
+			expectedResponseCode: http.StatusInternalServerError,
+			serviceReturnError:   fmt.Errorf("something when wrong"),
+		},
+	}
+
+	for _, tt := range tests {
+		toQueryParams := func(jobFilter rsources.JobFilter) string {
+			var params []string
+			for _, v := range jobFilter.TaskRunID {
+				params = append(params, fmt.Sprintf("task_run_id=%s", v))
+			}
+			for _, v := range jobFilter.SourceID {
+				params = append(params, fmt.Sprintf("source_id=%s", v))
+			}
+			if len(params) == 0 {
+				return ""
+			}
+			return "?" + strings.Join(params, "&")
+		}
+		t.Run(tt.name, func(t *testing.T) {
+			queryParams := toQueryParams(tt.jobFilter)
+			t.Log("endpoint tested:", tt.endpoint+queryParams)
+			service.EXPECT().DeleteFailedRecords(gomock.Any(), tt.jobRunId, tt.jobFilter).Return(tt.serviceReturnError).Times(1)
+
+			url := fmt.Sprintf("http://localhost:8080%s%s", tt.endpoint, queryParams)
+			req, err := http.NewRequest(tt.method, url, http.NoBody)
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+
+			handler.ServeHTTP(resp, req)
+			_, err = io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			require.Equal(t, tt.expectedResponseCode, resp.Code, "required error different than expected")
+		})
+	}
+}
+
+func TestGetFailedRecords(t *testing.T) {
+	var noPaging rsources.PagingInfo
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+	service := rsources.NewMockJobService(mockCtrl)
+	handler := rsources_http.NewV2Handler(service, mock_logger.NewMockLogger(mockCtrl))
 
 	tests := []struct {
 		name                 string
@@ -237,14 +326,14 @@ func TestGetFailedRecords(t *testing.T) {
 		method               string
 		expectedResponseCode int
 		filter               map[string][]string
-		failedRecords        rsources.JobFailedRecords
+		failedRecords        rsources.JobFailedRecordsV2
 		failedRecordsError   error
 		respBody             string
 	}{
 		{
 			name:                 "basic test - GetFailedRecords succeeds",
 			jobID:                "123",
-			endpoint:             prepURL("/v1/job-status/{job_run_id}/failed-records", "123"),
+			endpoint:             prepURL("/{job_run_id}/failed-records", "123"),
 			method:               "GET",
 			expectedResponseCode: http.StatusOK,
 			filter: map[string][]string{
@@ -252,25 +341,27 @@ func TestGetFailedRecords(t *testing.T) {
 				"source_id":   {"s1"},
 			},
 			failedRecordsError: nil,
-			failedRecords: rsources.JobFailedRecords{
+			failedRecords: rsources.JobFailedRecordsV2{
 				ID: "123",
-				Tasks: []rsources.TaskFailedRecords{{
+				Tasks: []rsources.TaskFailedRecords[rsources.FailedRecord]{{
 					ID: "t1",
-					Sources: []rsources.SourceFailedRecords{{
+					Sources: []rsources.SourceFailedRecords[rsources.FailedRecord]{{
 						ID: "s1",
-						Destinations: []rsources.DestinationFailedRecords{{
-							ID:      "d1",
-							Records: []json.RawMessage{json.RawMessage(`{"id":"record_123"}`)},
+						Destinations: []rsources.DestinationFailedRecords[rsources.FailedRecord]{{
+							ID: "d1",
+							Records: []rsources.FailedRecord{
+								{Record: json.RawMessage(`{"id":"record_123"}`)},
+							},
 						}},
 					}},
 				}},
 			},
-			respBody: `{"id":"123","tasks":[{"id":"t1","sources":[{"id":"s1","records":null,"destinations":[{"id":"d1","records":[{"id":"record_123"}]}]}]}]}`,
+			respBody: `{"id":"123","tasks":[{"id":"t1","sources":[{"id":"s1","records":null,"destinations":[{"id":"d1","records":[{"record":{"id":"record_123"},"code":0}]}]}]}]}`,
 		},
 		{
 			name:                 "get failed records basic test with no failed records",
 			jobID:                "123",
-			endpoint:             prepURL("/v1/job-status/{job_run_id}/failed-records", "123"),
+			endpoint:             prepURL("/{job_run_id}/failed-records", "123"),
 			method:               "GET",
 			expectedResponseCode: 200,
 			failedRecordsError:   nil,
@@ -278,22 +369,36 @@ func TestGetFailedRecords(t *testing.T) {
 				"task_run_id": {"t1", "t2"},
 				"source_id":   {"s1"},
 			},
-			failedRecords: rsources.JobFailedRecords{ID: "123"},
+			failedRecords: rsources.JobFailedRecordsV2{ID: "123"},
 			respBody:      `{"id":"123","tasks":null}`,
 		},
 		{
 			name:                 "get failed records basic test - GetFailedRecords fails",
 			jobID:                "123",
-			endpoint:             prepURL("/v1/job-status/{job_run_id}/failed-records", "123"),
+			endpoint:             prepURL("/{job_run_id}/failed-records", "123"),
 			method:               "GET",
 			expectedResponseCode: 500,
 			filter: map[string][]string{
 				"task_run_id": {"t1", "t2"},
 				"source_id":   {"s1"},
 			},
-			failedRecords:      rsources.JobFailedRecords{ID: "123"},
+			failedRecords:      rsources.JobFailedRecordsV2{ID: "123"},
 			failedRecordsError: errors.New("failed to get failed records"),
 			respBody:           failedRecordsRespBody,
+		},
+		{
+			name:                 "get failed records with invalid pagination token",
+			jobID:                "123",
+			endpoint:             prepURL("/{job_run_id}/failed-records", "123"),
+			method:               "GET",
+			expectedResponseCode: http.StatusBadRequest,
+			filter: map[string][]string{
+				"task_run_id": {"t1", "t2"},
+				"source_id":   {"s1"},
+			},
+			failedRecords:      rsources.JobFailedRecordsV2{ID: "123"},
+			failedRecordsError: rsources.ErrInvalidPaginationToken,
+			respBody:           rsources.ErrInvalidPaginationToken.Error() + "\n",
 		},
 	}
 	for _, tt := range tests {
@@ -301,7 +406,7 @@ func TestGetFailedRecords(t *testing.T) {
 			t.Log("endpoint tested:", tt.endpoint)
 
 			filterArg := getArgumentFilter(tt.filter)
-			service.EXPECT().GetFailedRecords(gomock.Any(), tt.jobID, filterArg).Return(tt.failedRecords, tt.failedRecordsError).Times(1)
+			service.EXPECT().GetFailedRecords(gomock.Any(), tt.jobID, filterArg, noPaging).Return(tt.failedRecords, tt.failedRecordsError).Times(1)
 
 			basicUrl := fmt.Sprintf("http://localhost:8080%s", tt.endpoint)
 			url := withFilter(basicUrl, tt.filter)
@@ -324,11 +429,11 @@ func TestFailedRecordsDisabled(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	service := rsources.NewMockJobService(mockCtrl)
-	handler := rsources_http.NewHandler(service, mock_logger.NewMockLogger(mockCtrl))
+	handler := rsources_http.NewV2Handler(service, mock_logger.NewMockLogger(mockCtrl))
 
-	service.EXPECT().GetFailedRecords(gomock.Any(), gomock.Any(), gomock.Any()).Return(rsources.JobFailedRecords{}, rsources.ErrOperationNotSupported).Times(1)
+	service.EXPECT().GetFailedRecords(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(rsources.JobFailedRecordsV2{}, rsources.ErrOperationNotSupported).Times(1)
 
-	url := fmt.Sprintf("http://localhost:8080%s", prepURL("/v1/job-status/{job_run_id}/failed-records", "123"))
+	url := fmt.Sprintf("http://localhost:8080%s", prepURL("/{job_run_id}/failed-records", "123"))
 	req, err := http.NewRequest("GET", url, http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
@@ -342,13 +447,13 @@ func TestFailedRecordsDisabled(t *testing.T) {
 	require.Equal(t, "rsources: operation not supported\n", string(body), "actual response body different than expected")
 }
 
-var failedRecordsRespBody string = `failed to get failed records
+var failedRecordsRespBody = `failed to get failed records
 `
 
-var statusNotFoundError string = `Status not found
+var statusNotFoundError = `Status not found
 `
 
-var getStatusFailedError string = `GetStatusFailed
+var getStatusFailedError = `GetStatusFailed
 `
 
 func getArgumentFilter(filter map[string][]string) rsources.JobFilter {
