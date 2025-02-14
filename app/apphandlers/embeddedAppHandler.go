@@ -2,243 +2,380 @@ package apphandlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
+	"time"
 
-	"github.com/rudderlabs/rudder-server/utils/types/deployment"
+	"github.com/rudderlabs/rudder-schemas/go/stream"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+
 	"github.com/rudderlabs/rudder-server/app"
 	"github.com/rudderlabs/rudder-server/app/cluster"
-	"github.com/rudderlabs/rudder-server/app/cluster/state"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-server/archiver"
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/gateway"
+	gwThrottler "github.com/rudderlabs/rudder-server/gateway/throttler"
+	drain_config "github.com/rudderlabs/rudder-server/internal/drain-config"
+	"github.com/rudderlabs/rudder-server/internal/pulsar"
 	"github.com/rudderlabs/rudder-server/jobsdb"
-	"github.com/rudderlabs/rudder-server/jobsdb/prebackup"
 	"github.com/rudderlabs/rudder-server/processor"
-	ratelimiter "github.com/rudderlabs/rudder-server/rate-limiter"
 	"github.com/rudderlabs/rudder-server/router"
 	"github.com/rudderlabs/rudder-server/router/batchrouter"
 	routerManager "github.com/rudderlabs/rudder-server/router/manager"
-	"github.com/rudderlabs/rudder-server/services/db"
+	rtThrottler "github.com/rudderlabs/rudder-server/router/throttler"
+	schema_forwarder "github.com/rudderlabs/rudder-server/schema-forwarder"
 	destinationdebugger "github.com/rudderlabs/rudder-server/services/debugger/destination"
 	sourcedebugger "github.com/rudderlabs/rudder-server/services/debugger/source"
 	transformationdebugger "github.com/rudderlabs/rudder-server/services/debugger/transformation"
-	fileuploader "github.com/rudderlabs/rudder-server/services/fileuploader"
-	"github.com/rudderlabs/rudder-server/services/multitenant"
-	"github.com/rudderlabs/rudder-server/services/stats"
+	"github.com/rudderlabs/rudder-server/services/fileuploader"
+	"github.com/rudderlabs/rudder-server/services/transformer"
 	"github.com/rudderlabs/rudder-server/services/transientsource"
+	"github.com/rudderlabs/rudder-server/utils/crash"
 	"github.com/rudderlabs/rudder-server/utils/misc"
+	"github.com/rudderlabs/rudder-server/utils/payload"
 	"github.com/rudderlabs/rudder-server/utils/types"
-	"github.com/rudderlabs/rudder-server/utils/types/servermode"
+	"github.com/rudderlabs/rudder-server/utils/types/deployment"
 )
 
-// EmbeddedApp is the type for embedded type implementation
-type EmbeddedApp struct {
-	App            app.App
-	VersionHandler func(w http.ResponseWriter, r *http.Request)
+// embeddedApp is the type for embedded type implementation
+type embeddedApp struct {
+	setupDone      bool
+	app            app.App
+	versionHandler func(w http.ResponseWriter, r *http.Request)
+	log            logger.Logger
+	config         struct {
+		processorDSLimit   config.ValueLoader[int]
+		routerDSLimit      config.ValueLoader[int]
+		batchRouterDSLimit config.ValueLoader[int]
+		gatewayDSLimit     config.ValueLoader[int]
+	}
 }
 
-func (*EmbeddedApp) GetAppType() string {
-	return fmt.Sprintf("rudder-server-%s", app.EMBEDDED)
+func (a *embeddedApp) Setup() error {
+	a.config.processorDSLimit = config.GetReloadableIntVar(0, 1, "Processor.jobsDB.dsLimit", "JobsDB.dsLimit")
+	a.config.gatewayDSLimit = config.GetReloadableIntVar(0, 1, "Gateway.jobsDB.dsLimit", "JobsDB.dsLimit")
+	a.config.routerDSLimit = config.GetReloadableIntVar(0, 1, "Router.jobsDB.dsLimit", "JobsDB.dsLimit")
+	a.config.batchRouterDSLimit = config.GetReloadableIntVar(0, 1, "BatchRouter.jobsDB.dsLimit", "JobsDB.dsLimit")
+	if err := rudderCoreDBValidator(); err != nil {
+		return err
+	}
+	if err := rudderCoreNodeSetup(); err != nil {
+		return err
+	}
+	a.setupDone = true
+	return nil
 }
 
-func (embedded *EmbeddedApp) StartRudderCore(ctx context.Context, options *app.Options) error {
-	pkgLogger.Info("Embedded mode: Starting Rudder Core")
+func (a *embeddedApp) StartRudderCore(ctx context.Context, options *app.Options) error {
+	config := config.Default
+	statsFactory := stats.Default
 
-	rudderCoreDBValidator()
-	rudderCoreWorkSpaceTableSetup()
-	rudderCoreNodeSetup()
-	rudderCoreBaseSetup()
-
+	if !a.setupDone {
+		return fmt.Errorf("embedded rudder core cannot start, database is not setup")
+	}
+	a.log.Info("Embedded mode: Starting Rudder Core")
 	g, ctx := errgroup.WithContext(ctx)
+	terminalErrFn := terminalErrorFunction(ctx, g)
 
 	deploymentType, err := deployment.GetFromEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get deployment type: %w", err)
 	}
-	pkgLogger.Infof("Configured deployment type: %q", deploymentType)
+	a.log.Infof("Configured deployment type: %q", deploymentType)
 
-	reporting := embedded.App.Features().Reporting.Setup(backendconfig.DefaultBackendConfig)
-
+	trackedUsersReporter, err := a.app.Features().TrackedUsers.Setup(config)
+	if err != nil {
+		return fmt.Errorf("could not setup tracked users: %w", err)
+	}
+	err = trackedUsersReporter.MigrateDatabase(misc.GetConnectionString(config, "tracked_users"), config)
+	if err != nil {
+		return fmt.Errorf("could not run tracked users database migration: %w", err)
+	}
+	reporting := a.app.Features().Reporting.Setup(ctx, config, backendconfig.DefaultBackendConfig)
+	defer reporting.Stop()
+	syncer := reporting.DatabaseSyncer(types.SyncerConfig{ConnInfo: misc.GetConnectionString(config, "reporting")})
 	g.Go(func() error {
-		reporting.AddClient(ctx, types.Config{ConnInfo: misc.GetConnectionString()})
+		syncer()
 		return nil
 	})
 
-	pkgLogger.Info("Clearing DB ", options.ClearDB)
+	a.log.Info("Clearing DB ", options.ClearDB)
 
-	transformationdebugger.Setup()
-	destinationdebugger.Setup(backendconfig.DefaultBackendConfig)
-	sourcedebugger.Setup(backendconfig.DefaultBackendConfig)
-
-	reportingI := embedded.App.Features().Reporting.GetReportingInstance()
-	transientSources := transientsource.NewService(ctx, backendconfig.DefaultBackendConfig)
-	prebackupHandlers := []prebackup.Handler{
-		prebackup.DropSourceIds(transientSources.SourceIdsSupplier()),
-	}
-
-	fileUploaderProvider := fileuploader.NewProvider(ctx, backendconfig.DefaultBackendConfig)
-
-	rsourcesService, err := NewRsourcesService(deploymentType)
+	transformationhandle, err := transformationdebugger.NewHandle(backendconfig.DefaultBackendConfig)
 	if err != nil {
 		return err
 	}
+	defer transformationhandle.Stop()
+	destinationHandle, err := destinationdebugger.NewHandle(backendconfig.DefaultBackendConfig)
+	if err != nil {
+		return err
+	}
+	defer destinationHandle.Stop()
+	sourceHandle, err := sourcedebugger.NewHandle(backendconfig.DefaultBackendConfig)
+	if err != nil {
+		return err
+	}
+	defer sourceHandle.Stop()
+
+	transientSources := transientsource.NewService(ctx, backendconfig.DefaultBackendConfig)
+
+	fileUploaderProvider := fileuploader.NewProvider(ctx, backendconfig.DefaultBackendConfig)
+
+	rsourcesService, err := NewRsourcesService(deploymentType, true, statsFactory)
+	if err != nil {
+		return err
+	}
+
+	transformerFeaturesService := transformer.NewFeaturesService(ctx, config, transformer.FeaturesServiceOptions{
+		PollInterval:             config.GetDuration("Transformer.pollInterval", 10, time.Second),
+		TransformerURL:           config.GetString("DEST_TRANSFORM_URL", "http://localhost:9090"),
+		FeaturesRetryMaxAttempts: 10,
+	})
+
+	var dbPool *sql.DB
+	if config.GetBoolVar(true, "db.pool.shared") {
+		dbPool, err = misc.NewDatabaseConnectionPool(ctx, config, statsFactory, "embedded-app")
+		if err != nil {
+			return err
+		}
+		defer dbPool.Close()
+	}
+
+	// This separate gateway db is created just to be used with gateway because in case of degraded mode,
+	// the earlier created gwDb (which was created to be used mainly with processor) will not be running, and it
+	// will cause issues for gateway because gateway is supposed to receive jobs even in degraded mode.
+	gatewayDB := jobsdb.NewForWrite(
+		"gw",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer gatewayDB.Close()
+	if err = gatewayDB.Start(); err != nil {
+		return fmt.Errorf("could not start gateway: %w", err)
+	}
+	defer gatewayDB.Stop()
 
 	// This gwDBForProcessor should only be used by processor as this is supposed to be stopped and started with the
 	// Processor.
 	gwDBForProcessor := jobsdb.NewForRead(
 		"gw",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&gatewayDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.gatewayDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Gateway.jobsDB.skipMaintenanceError", true)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer gwDBForProcessor.Close()
 	routerDB := jobsdb.NewForReadWrite(
 		"rt",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&routerDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.routerDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Router.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer routerDB.Close()
 	batchRouterDB := jobsdb.NewForReadWrite(
 		"batch_rt",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&batchRouterDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.batchRouterDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("BatchRouter.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
 	defer batchRouterDB.Close()
-	errDB := jobsdb.NewForReadWrite(
+
+	// We need two errorDBs, one in read & one in write mode to support separate gateway to store failures
+	errDBForRead := jobsdb.NewForRead(
 		"proc_error",
 		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-		jobsdb.WithPreBackupHandlers(prebackupHandlers),
-		jobsdb.WithDSLimit(&processorDSLimit),
-		jobsdb.WithFileUploaderProvider(fileUploaderProvider),
+		jobsdb.WithDSLimit(a.config.processorDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
 	)
-
-	var tenantRouterDB jobsdb.MultiTenantJobsDB
-	var multitenantStats multitenant.MultiTenantI
-	if misc.UseFairPickup() {
-		tenantRouterDB = &jobsdb.MultiTenantHandleT{HandleT: routerDB}
-		multitenantStats = multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
-			"rt":       tenantRouterDB,
-			"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
-		})
-	} else {
-		tenantRouterDB = &jobsdb.MultiTenantLegacy{HandleT: routerDB}
-		multitenantStats = multitenant.WithLegacyPickupJobs(multitenant.NewStats(map[string]jobsdb.MultiTenantJobsDB{
-			"rt":       tenantRouterDB,
-			"batch_rt": &jobsdb.MultiTenantLegacy{HandleT: batchRouterDB},
-		}))
+	defer errDBForRead.Close()
+	errDBForWrite := jobsdb.NewForWrite(
+		"proc_error",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", true)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer errDBForWrite.Close()
+	if err = errDBForWrite.Start(); err != nil {
+		return fmt.Errorf("could not start errDBForWrite: %w", err)
 	}
+	defer errDBForWrite.Stop()
 
-	var modeProvider cluster.ChangeEventProvider
+	schemaDB := jobsdb.NewForReadWrite(
+		"esch",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithDSLimit(a.config.processorDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer schemaDB.Close()
 
-	switch deploymentType {
-	case deployment.MultiTenantType:
-		pkgLogger.Info("using ETCD Based Dynamic Cluster Manager")
-		modeProvider = state.NewETCDDynamicProvider()
-	case deployment.DedicatedType:
-		// FIXME: hacky way to determine server mode
-		pkgLogger.Info("using Static Cluster Manager")
-		if enableProcessor && enableRouter {
-			modeProvider = state.NewStaticProvider(servermode.NormalMode)
-		} else {
-			modeProvider = state.NewStaticProvider(servermode.DegradedMode)
+	archivalDB := jobsdb.NewForReadWrite(
+		"arc",
+		jobsdb.WithClearDB(options.ClearDB),
+		jobsdb.WithDSLimit(a.config.processorDSLimit),
+		jobsdb.WithSkipMaintenanceErr(config.GetBool("Processor.jobsDB.skipMaintenanceError", false)),
+		jobsdb.WithStats(statsFactory),
+		jobsdb.WithJobMaxAge(
+			func() time.Duration {
+				return config.GetDuration("archival.jobRetention", 24, time.Hour)
+			},
+		),
+		jobsdb.WithDBHandle(dbPool),
+	)
+	defer archivalDB.Close()
+
+	var schemaForwarder schema_forwarder.Forwarder
+	if config.GetBool("EventSchemas2.enabled", false) {
+		client, err := pulsar.NewClient(config)
+		if err != nil {
+			return err
 		}
-	default:
-		return fmt.Errorf("unsupported deployment type: %q", deploymentType)
+		defer client.Close()
+		schemaForwarder = schema_forwarder.NewForwarder(terminalErrFn, schemaDB, &client, backendconfig.DefaultBackendConfig, logger.NewLogger().Child("jobs_forwarder"), config, statsFactory)
+	} else {
+		schemaForwarder = schema_forwarder.NewAbortingForwarder(terminalErrFn, schemaDB, logger.NewLogger().Child("jobs_forwarder"), config, statsFactory)
 	}
 
-	proc := processor.New(ctx, &options.ClearDB, gwDBForProcessor, routerDB, batchRouterDB, errDB, multitenantStats, reportingI, transientSources, fileUploaderProvider, rsourcesService)
+	modeProvider, err := resolveModeProvider(a.log, deploymentType)
+	if err != nil {
+		return err
+	}
+
+	adaptiveLimit := payload.SetupAdaptiveLimiter(ctx, g)
+
+	enrichers, err := setupPipelineEnrichers(config, a.log, statsFactory)
+	if err != nil {
+		return fmt.Errorf("setting up pipeline enrichers: %w", err)
+	}
+
+	defer func() {
+		for _, enricher := range enrichers {
+			_ = enricher.Close()
+		}
+	}()
+
+	proc := processor.New(
+		ctx,
+		&options.ClearDB,
+		gwDBForProcessor,
+		routerDB,
+		batchRouterDB,
+		errDBForRead,
+		errDBForWrite,
+		schemaDB,
+		archivalDB,
+		reporting,
+		transientSources,
+		fileUploaderProvider,
+		rsourcesService,
+		transformerFeaturesService,
+		destinationHandle,
+		transformationhandle,
+		enrichers,
+		trackedUsersReporter,
+		processor.WithAdaptiveLimit(adaptiveLimit),
+	)
+	throttlerFactory, err := rtThrottler.NewFactory(config, statsFactory)
+	if err != nil {
+		return fmt.Errorf("failed to create rt throttler factory: %w", err)
+	}
 	rtFactory := &router.Factory{
-		Reporting:        reportingI,
-		Multitenant:      multitenantStats,
-		BackendConfig:    backendconfig.DefaultBackendConfig,
-		RouterDB:         tenantRouterDB,
-		ProcErrorDB:      errDB,
-		TransientSources: transientSources,
-		RsourcesService:  rsourcesService,
+		Logger:                     logger.NewLogger().Child("router"),
+		Reporting:                  reporting,
+		BackendConfig:              backendconfig.DefaultBackendConfig,
+		RouterDB:                   routerDB,
+		ProcErrorDB:                errDBForWrite,
+		TransientSources:           transientSources,
+		RsourcesService:            rsourcesService,
+		TransformerFeaturesService: transformerFeaturesService,
+		ThrottlerFactory:           throttlerFactory,
+		Debugger:                   destinationHandle,
+		AdaptiveLimit:              adaptiveLimit,
 	}
 	brtFactory := &batchrouter.Factory{
-		Reporting:        reportingI,
-		Multitenant:      multitenantStats,
+		Reporting:        reporting,
 		BackendConfig:    backendconfig.DefaultBackendConfig,
 		RouterDB:         batchRouterDB,
-		ProcErrorDB:      errDB,
+		ProcErrorDB:      errDBForWrite,
 		TransientSources: transientSources,
 		RsourcesService:  rsourcesService,
+		Debugger:         destinationHandle,
+		AdaptiveLimit:    adaptiveLimit,
 	}
-	rt := routerManager.New(rtFactory, brtFactory, backendconfig.DefaultBackendConfig)
+	rt := routerManager.New(rtFactory, brtFactory, backendconfig.DefaultBackendConfig, logger.NewLogger())
 
 	dm := cluster.Dynamic{
 		Provider:        modeProvider,
 		GatewayDB:       gwDBForProcessor,
 		RouterDB:        routerDB,
 		BatchRouterDB:   batchRouterDB,
-		ErrorDB:         errDB,
+		ErrorDB:         errDBForRead,
+		EventSchemaDB:   schemaDB,
+		ArchivalDB:      archivalDB,
 		Processor:       proc,
 		Router:          rt,
-		MultiTenantStat: multitenantStats,
+		SchemaForwarder: schemaForwarder,
+		Archiver: archiver.New(
+			archivalDB,
+			fileUploaderProvider,
+			config,
+			statsFactory,
+			archiver.WithAdaptiveLimit(adaptiveLimit),
+		),
 	}
 
-	rateLimiter := ratelimiter.HandleT{}
-	rateLimiter.SetUp()
-	gw := gateway.HandleT{}
-	// This separate gateway db is created just to be used with gateway because in case of degraded mode,
-	// the earlier created gwDb (which was created to be used mainly with processor) will not be running, and it
-	// will cause issues for gateway because gateway is supposed to receive jobs even in degraded mode.
-	gatewayDB = jobsdb.NewForWrite(
-		"gw",
-		jobsdb.WithClearDB(options.ClearDB),
-		jobsdb.WithStatusHandler(),
-	)
-	defer gwDBForProcessor.Close()
-	if err = gatewayDB.Start(); err != nil {
-		return fmt.Errorf("could not start gateway: %w", err)
+	rateLimiter, err := gwThrottler.New(statsFactory)
+	if err != nil {
+		return fmt.Errorf("failed to create gw rate limiter: %w", err)
 	}
-	defer gatewayDB.Stop()
-
-	gw.SetReadonlyDBs(&readonlyGatewayDB, &readonlyRouterDB, &readonlyBatchRouterDB)
-	err = gw.Setup(
-		embedded.App, backendconfig.DefaultBackendConfig, gatewayDB,
-		&rateLimiter, embedded.VersionHandler, rsourcesService,
-	)
+	drainConfigManager, err := drain_config.NewDrainConfigManager(config, a.log.Child("drain-config"), statsFactory)
+	if err != nil {
+		return fmt.Errorf("drain config manager setup: %v", err)
+	}
+	defer drainConfigManager.Stop()
+	g.Go(crash.Wrapper(func() (err error) {
+		return drainConfigManager.DrainConfigRoutine(ctx)
+	}))
+	g.Go(crash.Wrapper(func() (err error) {
+		return drainConfigManager.CleanupRoutine(ctx)
+	}))
+	streamMsgValidator := stream.NewMessageValidator()
+	gw := gateway.Handle{}
+	err = gw.Setup(ctx, config, logger.NewLogger().Child("gateway"), statsFactory, a.app, backendconfig.DefaultBackendConfig,
+		gatewayDB, errDBForWrite, rateLimiter, a.versionHandler, rsourcesService, transformerFeaturesService, sourceHandle,
+		streamMsgValidator, gateway.WithInternalHttpHandlers(
+			map[string]http.Handler{
+				"/drain": drainConfigManager.DrainConfigHttpHandler(),
+			},
+		))
 	if err != nil {
 		return fmt.Errorf("could not setup gateway: %w", err)
 	}
 	defer func() {
 		if err := gw.Shutdown(); err != nil {
-			pkgLogger.Warnf("Gateway shutdown error: %v", err)
+			a.log.Warnf("Gateway shutdown error: %v", err)
 		}
 	}()
 
 	g.Go(func() error {
-		return gw.StartAdminHandler(ctx)
-	})
-	g.Go(func() error {
 		return gw.StartWebHandler(ctx)
 	})
-	if enableReplay {
-		var replayDB jobsdb.HandleT
-		err := replayDB.Setup(
-			jobsdb.ReadWrite, options.ClearDB, "replay",
-			true, prebackupHandlers, fileUploaderProvider,
-		)
-		if err != nil {
-			return fmt.Errorf("could not setup replayDB: %w", err)
-		}
-		defer replayDB.TearDown()
-		embedded.App.Features().Replay.Setup(ctx, &replayDB, gatewayDB, routerDB, batchRouterDB)
-	}
 
 	g.Go(func() error {
 		// This should happen only after setupDatabaseTables() is called and journal table migrations are done
@@ -252,15 +389,11 @@ func (embedded *EmbeddedApp) StartRudderCore(ctx context.Context, options *app.O
 	})
 
 	g.Go(func() error {
-		replicationLagStat := stats.Default.NewStat("rsources_log_replication_lag", stats.GaugeType)
-		replicationSlotStat := stats.Default.NewStat("rsources_log_replication_slot", stats.GaugeType)
+		replicationLagStat := statsFactory.NewStat("rsources_log_replication_lag", stats.GaugeType)
+		replicationSlotStat := statsFactory.NewStat("rsources_log_replication_slot", stats.GaugeType)
 		rsourcesService.Monitor(ctx, replicationLagStat, replicationSlotStat)
 		return nil
 	})
 
 	return g.Wait()
-}
-
-func (*EmbeddedApp) HandleRecovery(options *app.Options) {
-	db.HandleEmbeddedRecovery(options.NormalMode, options.DegradedMode, misc.AppStartTime, app.EMBEDDED)
 }

@@ -6,80 +6,234 @@ on:
       - main
       - "release/*"
   pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
 jobs:
   integration:
-    name: Integrations
-    runs-on: 'ubuntu-20.04'
+    name: Integration
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        FEATURES: [oss ,enterprise]
+        FEATURES: [ oss ,enterprise ]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - uses: actions/setup-go@v3
-      with:
-        go-version: '~1.19.2'
-        check-latest: true
-        cache: true
-    - run: go version
-    - run: go mod download # Not required, used to segregate module download vs test times
-
-    - name: Integration test for enterprise
-      if: matrix.FEATURES == 'enterprise'
-      run: go test -v ./integration_test/docker_test/docker_test.go -count 1
-      env:
-        ENTERPRISE_TOKEN: ${{ secrets.ENTERPRISE_TOKEN }}
-
-    - name: Integration test for oss
-      if: matrix.FEATURES == 'oss'
-      run: go test -v ./integration_test/docker_test/docker_test.go -count 1
-      env:
-        RSERVER_ENABLE_MULTITENANCY: ${{ matrix.MULTITENANCY }}
-
-  warehouse-integration:
-    name: Warehouse Service Integration
-    runs-on: 'ubuntu-20.04'
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v3
+      - name: Disable IPv6 (temporary fix)
+        run: |
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '~1.19.2'
-          check-latest: true
-          cache: true
+          go-version-file: 'go.mod'
+      - run: go version
+      - run: go mod download # Not required, used to segregate module download vs test times
+
+      - name: enterprise
+        if: matrix.FEATURES == 'enterprise'
+        run: go test -v ./integration_test/docker_test/docker_test.go -count 1
+        env:
+          ENTERPRISE_TOKEN: ${{ secrets.ENTERPRISE_TOKEN }}
+
+      - name: oss
+        if: matrix.FEATURES == 'oss'
+        run: go test -v ./integration_test/docker_test/docker_test.go -count 1
+        env:
+          RSERVER_ENABLE_MULTITENANCY: false
+  warehouse-integration:
+    name: Warehouse Integration
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        destination: [ bigquery, clickhouse, datalake, deltalake, mssql, azure-synapse, postgres, redshift, snowflake ]
+        include:
+          - package: warehouse/integrations/bigquery
+            destination: bigquery
+          - package: warehouse/integrations/clickhouse
+            destination: clickhouse
+          - package: warehouse/integrations/datalake
+            destination: datalake
+          - package: warehouse/integrations/deltalake
+            destination: deltalake
+          - package: warehouse/integrations/mssql
+            destination: mssql
+          - package: warehouse/integrations/azure-synapse
+            destination: azure-synapse
+          - package: warehouse/integrations/postgres
+            destination: postgres
+          - package: warehouse/integrations/redshift
+            destination: redshift
+          - package: warehouse/integrations/snowflake
+            destination: snowflake
+    steps:
+      - name: Disable IPv6 (temporary fix)
+        run: |
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
       - run: go version
       - run: go mod download # Not required, used to segregate module download vs test times
       - name: Login to DockerHub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3.3.0
         with:
           username: rudderlabs
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Warehouse Integration Test
-        run: make run-warehouse-integration
+      - name: Set Redshift Ginkgo AWS Credentials
+        if: matrix.destination == 'redshift'
+        run: |
+          echo "Setting Redshift Ginkgo AWS Credentials..."
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_REDSHIFT_GINKGO_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_REDSHIFT_GINKGO_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+      - name: Warehouse Service Integration [ ${{ matrix.destination }} ]
+        run: FORCE_RUN_INTEGRATION_TESTS=true make test-warehouse package=${{ matrix.package }}
         env:
           BIGQUERY_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.BIGQUERY_INTEGRATION_TEST_CREDENTIALS }}
-          REDSHIFT_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.REDSHIFT_INTEGRATION_TEST_CREDENTIALS }}
-          SNOWFLAKE_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWFLAKE_INTEGRATION_TEST_CREDENTIALS }}
           DATABRICKS_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.DATABRICKS_INTEGRATION_TEST_CREDENTIALS }}
-
+          REDSHIFT_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.REDSHIFT_INTEGRATION_TEST_CREDENTIALS }}
+          REDSHIFT_IAM_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.REDSHIFT_IAM_INTEGRATION_TEST_CREDENTIALS }}
+          REDSHIFT_SERVERLESS_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.REDSHIFT_SERVERLESS_INTEGRATION_TEST_CREDENTIALS }}
+          REDSHIFT_SERVERLESS_IAM_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.REDSHIFT_SERVERLESS_IAM_INTEGRATION_TEST_CREDENTIALS }}
+          SNOWFLAKE_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWFLAKE_INTEGRATION_TEST_CREDENTIALS }}
+          SNOWFLAKE_RBAC_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWFLAKE_RBAC_INTEGRATION_TEST_CREDENTIALS }}
+          SNOWFLAKE_KEYPAIR_ENCRYPTED_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWFLAKE_KEYPAIR_ENCRYPTED_INTEGRATION_TEST_CREDENTIALS }}
+          SNOWFLAKE_KEYPAIR_UNENCRYPTED_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWFLAKE_KEYPAIR_UNENCRYPTED_INTEGRATION_TEST_CREDENTIALS }}
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.destination }}
+          path: coverage.txt
   unit:
     name: Unit
-    runs-on: 'ubuntu-20.04'
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/setup-go@v3
-      with:
-        go-version: '~1.19.2'
-        check-latest: true
-        cache: true
+      - name: Disable IPv6 (temporary fix)
+        run: |
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - run: go version
+      - run: go mod download # Not required, used to segregate module download vs test times
+      - run: FORCE_RUN_INTEGRATION_TESTS=true make test exclude="/rudder-server/(jobsdb|integration_test|processor|regulation-worker|router|services|suppression-backup-service|warehouse)"
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit
+          path: coverage.txt
+  package-unit:
+    name: Package Unit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - jobsdb
+          - integration_test/docker_test
+          - integration_test/kafka_batching
+          - integration_test/multi_tenant_test
+          - integration_test/reporting_dropped_events
+          - integration_test/reporting_error_index
+          - integration_test/warehouse
+          - integration_test/tracing
+          - integration_test/backendconfigunavailability
+          - integration_test/trackedusersreporting
+          - integration_test/snowpipestreaming
+          - processor
+          - regulation-worker
+          - router
+          - services
+          - services/rsources
+          - services/dedup
+          - suppression-backup-service
+          - warehouse
+        include:
+          - package: services
+            exclude: services/rsources
+          - package: services
+            exclude: services/dedup
 
-    - run: go version
-    - run: go mod download # Not required, used to segregate module download vs test times
-    - env:
-        TEST_KAFKA_CONFLUENT_CLOUD_HOST: ${{ secrets.TEST_KAFKA_CONFLUENT_CLOUD_HOST }}
-        TEST_KAFKA_CONFLUENT_CLOUD_KEY: ${{ secrets.TEST_KAFKA_CONFLUENT_CLOUD_KEY }}
-        TEST_KAFKA_CONFLUENT_CLOUD_SECRET: ${{ secrets.TEST_KAFKA_CONFLUENT_CLOUD_SECRET }}
-        TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_HOST: ${{ secrets.TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_HOST }}
-        TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_EVENTHUB_NAME: ${{ secrets.TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_EVENTHUB_NAME }}
-        TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_CONNECTION_STRING: ${{ secrets.TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_CONNECTION_STRING }}
-      run: make test
-    - uses: codecov/codecov-action@v2
+    steps:
+      - name: Disable IPv6 (temporary fix)
+        if: matrix.package != 'services/dedup'
+        run: |
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - run: go version
+      - run: go mod download
+      - name: Login to DockerHub
+        uses: docker/login-action@v3.3.0
+        with:
+          username: rudderlabs
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Package Unit [ ${{ matrix.package }} ]
+        env:
+          TEST_KAFKA_CONFLUENT_CLOUD_HOST: ${{ secrets.TEST_KAFKA_CONFLUENT_CLOUD_HOST }}
+          TEST_KAFKA_CONFLUENT_CLOUD_KEY: ${{ secrets.TEST_KAFKA_CONFLUENT_CLOUD_KEY }}
+          TEST_KAFKA_CONFLUENT_CLOUD_SECRET: ${{ secrets.TEST_KAFKA_CONFLUENT_CLOUD_SECRET }}
+          TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_HOST: ${{ secrets.TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_HOST }}
+          TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_EVENTHUB_NAME: ${{ secrets.TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_EVENTHUB_NAME }}
+          TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_CONNECTION_STRING: ${{ secrets.TEST_KAFKA_AZURE_EVENT_HUBS_CLOUD_CONNECTION_STRING }}
+          TEST_S3_DATALAKE_CREDENTIALS: ${{ secrets.TEST_S3_DATALAKE_CREDENTIALS }}
+          BIGQUERY_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.BIGQUERY_INTEGRATION_TEST_CREDENTIALS }}
+          SNOWPIPE_STREAMING_KEYPAIR_UNENCRYPTED_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWPIPE_STREAMING_KEYPAIR_UNENCRYPTED_INTEGRATION_TEST_CREDENTIALS }}
+          SNOWPIPE_STREAMING_KEYPAIR_ENCRYPTED_INTEGRATION_TEST_CREDENTIALS: ${{ secrets.SNOWPIPE_STREAMING_KEYPAIR_ENCRYPTED_INTEGRATION_TEST_CREDENTIALS }}
+        run: FORCE_RUN_INTEGRATION_TESTS=true make test exclude="${{ matrix.exclude }}" package=${{ matrix.package }}
+      - name: Sanitize name for Artifact
+        run: |
+          name=$(echo -n "${{ matrix.package }}" | sed -e 's/[ \t:\/\\"<>|*?]/-/g' -e 's/--*/-/g')
+          echo "ARTIFACT_NAME=$name" >> $GITHUB_ENV
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-unit
+          path: coverage.txt
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs:
+      - warehouse-integration
+      - unit
+      - package-unit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - name: Download coverage reports
+        uses: actions/download-artifact@v4
+      - name: Merge Coverage
+        run: |
+          go install github.com/wadey/gocovmerge@latest
+          gocovmerge */coverage.txt > coverage.txt
+      - uses: codecov/codecov-action@v5
+        with:
+          fail_ci_if_error: true
+          files: ./coverage.txt
+          token: ${{ secrets.CODECOV_TOKEN }}
+  all-green:
+    name: All
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - integration
+      - warehouse-integration
+      - unit
+      - package-unit
+    steps:
+      - uses: re-actors/alls-green@v1.2.2
+        with:
+          jobs: ${{ toJSON(needs) }}

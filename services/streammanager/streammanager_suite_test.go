@@ -11,21 +11,24 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/rudderlabs/rudder-server/config"
-	"github.com/rudderlabs/rudder-server/utils/logger"
 
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+
+	"github.com/stretchr/testify/assert"
+
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
 	"github.com/rudderlabs/rudder-server/services/streammanager"
 	"github.com/rudderlabs/rudder-server/services/streammanager/bqstream"
 	"github.com/rudderlabs/rudder-server/services/streammanager/common"
 	"github.com/rudderlabs/rudder-server/services/streammanager/eventbridge"
 	"github.com/rudderlabs/rudder-server/services/streammanager/firehose"
+	cloudfunctions "github.com/rudderlabs/rudder-server/services/streammanager/googlecloudfunction"
 	"github.com/rudderlabs/rudder-server/services/streammanager/googlepubsub"
 	"github.com/rudderlabs/rudder-server/services/streammanager/kafka"
 	"github.com/rudderlabs/rudder-server/services/streammanager/kinesis"
 	"github.com/rudderlabs/rudder-server/services/streammanager/lambda"
 	"github.com/rudderlabs/rudder-server/services/streammanager/personalize"
-	"github.com/stretchr/testify/assert"
 )
 
 var once sync.Once
@@ -197,7 +200,7 @@ func TestNewProducerWithBQStreamDestination(t *testing.T) {
 						"project_id": "",
 						"private_key_id": "",
 						"private_key": "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----\n",
-						"client_email": "",
+						"client_email": "foo@barr.com",
 						"client_id": "",
 						"auth_uri": "https://accounts.google.com/o/oauth2/auth",
 						"token_uri": "https://oauth2.googleapis.com/token",
@@ -266,4 +269,36 @@ func TestNewProducerWithGoogleSheetsDestination(t *testing.T) {
 	assert.Error(t, err)
 	// error contains "Kafka" means we called right producer
 	assert.ErrorContains(t, err, "GoogleSheets")
+}
+
+func TestNewProducerWithGoogleCloudFunctionDestination(t *testing.T) {
+	initStreamManager()
+	producer, err := streammanager.NewProducer(
+		&backendconfig.DestinationT{
+			DestinationDefinition: backendconfig.DestinationDefinitionT{Name: "GOOGLE_CLOUD_FUNCTION"},
+			Config: map[string]interface{}{
+				"ProjectId": "someProjectID",
+				"Credentials": `
+				{
+					"type": "service_account",
+					"project_id": "",
+					"private_key_id": "",
+					"private_key": "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----\n",
+					"client_email": "",
+					"client_id": "",
+					"auth_uri": "https://accounts.google.com/o/oauth2/auth",
+					"token_uri": "https://oauth2.googleapis.com/token",
+					"auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+					"client_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+					"universe_domain": "googleapis.com"
+				}
+				`,
+				"GoogleCloudFunctionUrl": "https://sample-location-sample-proj-test-poc.cloudfunctions.net/function-x",
+			},
+		},
+		common.Opts{})
+
+	assert.Nil(t, err)
+	assert.NotNil(t, producer)
+	assert.IsType(t, producer, &cloudfunctions.GoogleCloudFunctionProducer{})
 }

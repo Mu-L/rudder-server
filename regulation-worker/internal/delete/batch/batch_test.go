@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rudderlabs/rudder-server/regulation-worker/internal/delete/batch"
-	"github.com/rudderlabs/rudder-server/regulation-worker/internal/initialize"
-	"github.com/rudderlabs/rudder-server/regulation-worker/internal/model"
-	"github.com/rudderlabs/rudder-server/services/filemanager"
 	"github.com/stretchr/testify/require"
+
+	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-server/regulation-worker/internal/delete/batch"
+	"github.com/rudderlabs/rudder-server/regulation-worker/internal/model"
 )
 
 var (
@@ -29,8 +29,6 @@ var (
 const mockBucket = "mockBucket"
 
 func TestBatchDelete(t *testing.T) {
-	initialize.Init()
-
 	ctx := context.Background()
 	tests := []struct {
 		name           string
@@ -45,7 +43,7 @@ func TestBatchDelete(t *testing.T) {
 				ID:            1,
 				WorkspaceID:   "1001",
 				DestinationID: "1234",
-				Status:        model.JobStatusPending,
+				Status:        model.JobStatus{Status: model.JobStatusPending},
 				Users: []model.User{
 					{
 						ID: "Jermaine1473336609491897794707338",
@@ -81,12 +79,12 @@ func TestBatchDelete(t *testing.T) {
 		},
 	}
 	bm := batch.BatchManager{
-		FMFactory: mockFileManagerFactory{},
+		FMFactory: mockFileManagerFactory,
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status := bm.Delete(ctx, tt.job, tt.dest.Config, tt.dest.Name)
-			require.Equal(t, model.JobStatusComplete, status)
+			status := bm.Delete(ctx, tt.job, tt.dest)
+			require.Equal(t, model.JobStatus{Status: model.JobStatusComplete}, status)
 
 			searchDir := mockBucketLocation
 			var cleanedFilesList []string
@@ -145,10 +143,8 @@ func TestBatchDelete(t *testing.T) {
 	}
 }
 
-type mockFileManagerFactory struct{}
-
 // creates a tmp directory & copy all the content of testData in it, to use it as mockBucket & store it in mockFileManager struct.
-func (mockFileManagerFactory) New(_ *filemanager.SettingsT) (filemanager.FileManager, error) {
+func mockFileManagerFactory(_ *filemanager.Settings) (filemanager.FileManager, error) {
 	// create tmp directory
 	// parent directory of all the temporary files created/downloaded in the process of deletion.
 	tmpDirPath, err := os.MkdirTemp("", "")
@@ -176,7 +172,7 @@ type mockFileManager struct {
 func (*mockFileManager) SetTimeout(_ time.Duration) {}
 
 // Given a file pointer with cleaned file content upload to the appropriate destination, with the same name as the original.
-func (fm *mockFileManager) Upload(_ context.Context, file *os.File, prefixes ...string) (filemanager.UploadOutput, error) {
+func (fm *mockFileManager) Upload(_ context.Context, file *os.File, prefixes ...string) (filemanager.UploadedFile, error) {
 	splitFileName := strings.Split(file.Name(), "/")
 	fileName := ""
 	if len(prefixes) > 0 {
@@ -187,15 +183,15 @@ func (fm *mockFileManager) Upload(_ context.Context, file *os.File, prefixes ...
 	finalFileName := fmt.Sprintf("%s/%s", fm.mockBucketLocation, fileName)
 	uploadFilePtr, err := os.OpenFile(finalFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return filemanager.UploadOutput{}, err
+		return filemanager.UploadedFile{}, err
 	}
 	defer uploadFilePtr.Close()
 	_, err = io.Copy(uploadFilePtr, file)
 	if err != nil {
-		return filemanager.UploadOutput{}, err
+		return filemanager.UploadedFile{}, err
 	}
 
-	return filemanager.UploadOutput{
+	return filemanager.UploadedFile{
 		Location:   fm.mockBucketLocation + "/" + fileName,
 		ObjectName: fileName,
 	}, nil
@@ -220,7 +216,7 @@ func (fm *mockFileManager) Download(_ context.Context, outputFilePtr *os.File, l
 }
 
 // Given a file name as key, delete if it is present in the bucket.
-func (fm *mockFileManager) DeleteObjects(_ context.Context, keys []string) error {
+func (fm *mockFileManager) Delete(_ context.Context, keys []string) error {
 	for _, key := range keys {
 		fileLocation := fmt.Sprint(fm.mockBucketLocation, "/", key)
 		_, err := exec.Command("rm", "-rf", fileLocation).Output()
@@ -232,9 +228,13 @@ func (fm *mockFileManager) DeleteObjects(_ context.Context, keys []string) error
 }
 
 // given prefix & maxItems, return with list of Fileobject in the bucket.
-func (fm *mockFileManager) ListFilesWithPrefix(_ context.Context, _, _ string, _ int64) (fileObjects []*filemanager.FileObject, err error) {
+func (fm *mockFileManager) ListFilesWithPrefix(_ context.Context, _, _ string, _ int64) filemanager.ListSession {
+	return fm
+}
+
+func (fm *mockFileManager) Next() (fileObjects []*filemanager.FileInfo, err error) {
 	if fm.listCalled {
-		return []*filemanager.FileObject{}, nil
+		return []*filemanager.FileInfo{}, nil
 	}
 	fm.listCalled = true
 	searchDir := fm.mockBucketLocation
@@ -242,7 +242,7 @@ func (fm *mockFileManager) ListFilesWithPrefix(_ context.Context, _, _ string, _
 		splitStr := strings.Split(path, mockBucket)
 		finalStr := strings.TrimLeft(splitStr[len(splitStr)-1], "/")
 		if finalStr != "" {
-			fileObjects = append(fileObjects, &filemanager.FileObject{Key: splitStr[len(splitStr)-1]})
+			fileObjects = append(fileObjects, &filemanager.FileInfo{Key: splitStr[len(splitStr)-1]})
 		}
 		return nil
 	})
@@ -260,6 +260,6 @@ func (*mockFileManager) GetDownloadKeyFromFileLocation(_ string) string {
 	return ""
 }
 
-func (*mockFileManager) GetConfiguredPrefix() string {
+func (*mockFileManager) Prefix() string {
 	return ""
 }

@@ -6,8 +6,9 @@ import (
 	"net"
 
 	"github.com/hashicorp/yamux"
-	proto "github.com/rudderlabs/rudder-server/proto/common"
 	"google.golang.org/grpc"
+
+	proto "github.com/rudderlabs/rudder-server/proto/common"
 )
 
 type ConnHandler struct {
@@ -37,7 +38,7 @@ func (cm *ConnectionManager) establishConnection() (*ConnHandler, error) {
 		return nil, err
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(cm.Options...)
 	service := &authService{authInfo: cm.AuthInfo}
 	proto.RegisterDPAuthServiceServer(grpcServer, service)
 	cn := &ConnHandler{

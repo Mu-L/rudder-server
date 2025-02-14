@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/rudderlabs/rudder-server/utils/httputil"
 )
 
 func WaitUntilReady(
-	ctx context.Context, t *testing.T, endpoint string, atMost, interval time.Duration, caller string,
+	ctx context.Context, t testing.TB, endpoint string, atMost, interval time.Duration, caller string,
 ) {
 	t.Helper()
 	probe := time.NewTicker(interval)
@@ -26,7 +28,7 @@ func WaitUntilReady(
 			if err != nil {
 				continue
 			}
-			defer resp.Body.Close()
+			func() { httputil.CloseResponse(resp) }()
 			if resp.StatusCode == http.StatusOK {
 				t.Log("Application ready")
 				return

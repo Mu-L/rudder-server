@@ -2,22 +2,24 @@ package jobsdb
 
 import (
 	"fmt"
+	"time"
 )
 
-func (jd *HandleT) executeDbRequest(c *dbRequest) interface{} {
-	totalTimeStat := jd.getTimerStat(fmt.Sprintf("%s_total_time", c.name), c.tags)
-	totalTimeStat.Start()
-	defer totalTimeStat.End()
+func executeDbRequest[T any](jd *Handle, c *dbRequest[T]) T {
+	defer jd.getTimerStat(
+		fmt.Sprintf("jobsdb_%s_total_time", c.name),
+		c.tags,
+	).RecordDuration()()
 
 	var queueEnabled bool
 	var queueCap chan struct{}
 	switch c.reqType {
 	case readReqType:
-		queueEnabled = jd.enableReaderQueue
-		queueCap = jd.readCapacity
+		queueEnabled = jd.conf.enableReaderQueue
+		queueCap = jd.conf.readCapacity
 	case writeReqType:
-		queueEnabled = jd.enableWriterQueue
-		queueCap = jd.writeCapacity
+		queueEnabled = jd.conf.enableWriterQueue
+		queueCap = jd.conf.writeCapacity
 	case undefinedReqType:
 		fallthrough
 	default:
@@ -25,11 +27,11 @@ func (jd *HandleT) executeDbRequest(c *dbRequest) interface{} {
 	}
 
 	if queueEnabled {
-		waitTimeStat := jd.getTimerStat(fmt.Sprintf("%s_wait_time", c.name), c.tags)
-		waitTimeStat.Start()
+		queuedAt := time.Now()
+		waitTimeStat := jd.getTimerStat(fmt.Sprintf("jobsdb_%s_wait_time", c.name), c.tags)
 		queueCap <- struct{}{}
 		defer func() { <-queueCap }()
-		waitTimeStat.End()
+		waitTimeStat.Since(queuedAt)
 	}
 
 	return c.command()
@@ -43,15 +45,15 @@ const (
 	writeReqType
 )
 
-type dbRequest struct {
+type dbRequest[T any] struct {
 	reqType dbReqType
 	name    string
 	tags    *statTags
-	command func() interface{}
+	command func() T
 }
 
-func newReadDbRequest(name string, tags *statTags, command func() interface{}) *dbRequest {
-	return &dbRequest{
+func newReadDbRequest[T any](name string, tags *statTags, command func() T) *dbRequest[T] {
+	return &dbRequest[T]{
 		reqType: readReqType,
 		name:    name,
 		tags:    tags,
@@ -59,8 +61,8 @@ func newReadDbRequest(name string, tags *statTags, command func() interface{}) *
 	}
 }
 
-func newWriteDbRequest(name string, tags *statTags, command func() interface{}) *dbRequest {
-	return &dbRequest{
+func newWriteDbRequest[T any](name string, tags *statTags, command func() T) *dbRequest[T] {
+	return &dbRequest[T]{
 		reqType: writeReqType,
 		name:    name,
 		tags:    tags,

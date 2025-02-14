@@ -1,7 +1,10 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,15 +13,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linkedin/goavro"
+	"github.com/linkedin/goavro/v2"
 	"github.com/tidwall/gjson"
 
-	"github.com/rudderlabs/rudder-server/config"
-	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	"github.com/rudderlabs/rudder-server/services/stats"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	client "github.com/rudderlabs/rudder-go-kit/kafkaclient"
+	rslogger "github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
+	"github.com/rudderlabs/rudder-server/services/controlplane"
+	"github.com/rudderlabs/rudder-server/services/controlplane/identity"
 	"github.com/rudderlabs/rudder-server/services/streammanager/common"
-	"github.com/rudderlabs/rudder-server/services/streammanager/kafka/client"
-	rslogger "github.com/rudderlabs/rudder-server/utils/logger"
 )
 
 // schema is the AVRO schema required to convert the data to AVRO
@@ -29,17 +35,25 @@ type avroSchema struct {
 
 // configuration is the config that is required to send data to Kafka
 type configuration struct {
-	Topic         string
-	HostName      string
-	Port          string
+	Topic    string
+	HostName string
+	Port     string
+
 	SslEnabled    bool
 	CACertificate string
 	UseSASL       bool
 	SaslType      string
 	Username      string
 	Password      string
-	ConvertToAvro bool
-	AvroSchemas   []avroSchema
+
+	ConvertToAvro     bool
+	EmbedAvroSchemaID bool
+	AvroSchemas       []avroSchema
+
+	UseSSH  bool
+	SSHHost string
+	SSHPort string
+	SSHUser string
 }
 
 func (c *configuration) validate() error {
@@ -49,12 +63,19 @@ func (c *configuration) validate() error {
 	if c.HostName == "" {
 		return fmt.Errorf("hostname cannot be empty")
 	}
-	port, err := strconv.Atoi(c.Port)
-	if err != nil {
+	if err := isValidPort(c.Port); err != nil {
 		return fmt.Errorf("invalid port: %w", err)
 	}
-	if port < 1 {
-		return fmt.Errorf("invalid port: %d", port)
+	if c.UseSSH {
+		if c.SSHHost == "" {
+			return fmt.Errorf("ssh host cannot be empty")
+		}
+		if c.SSHUser == "" {
+			return fmt.Errorf("ssh user cannot be empty")
+		}
+		if err := isValidPort(c.SSHPort); err != nil {
+			return fmt.Errorf("invalid ssh port: %w", err)
+		}
 	}
 	return nil
 }
@@ -115,6 +136,7 @@ type producerManager interface {
 	io.Closer
 	publisher
 	getTimeout() time.Duration
+	getEmbedAvroSchemaID() bool
 	getCodecs() map[string]*goavro.Codec
 }
 
@@ -124,9 +146,10 @@ type internalProducer interface {
 }
 
 type ProducerManager struct {
-	p       internalProducer
-	timeout time.Duration
-	codecs  map[string]*goavro.Codec
+	p                 internalProducer
+	timeout           time.Duration
+	embedAvroSchemaID bool
+	codecs            map[string]*goavro.Codec
 }
 
 func (p *ProducerManager) getTimeout() time.Duration {
@@ -136,13 +159,13 @@ func (p *ProducerManager) getTimeout() time.Duration {
 	return p.timeout
 }
 
-func (p *ProducerManager) getCodecs() map[string]*goavro.Codec {
-	return p.codecs
-}
+func (p *ProducerManager) getCodecs() map[string]*goavro.Codec { return p.codecs }
+func (p *ProducerManager) getEmbedAvroSchemaID() bool          { return p.embedAvroSchemaID }
 
 type logger interface {
 	Error(args ...interface{})
 	Errorf(format string, args ...interface{})
+	Infof(format string, args ...interface{})
 }
 
 type managerStats struct {
@@ -157,10 +180,13 @@ type managerStats struct {
 	closeProducerTime          stats.Measurement
 	jsonSerializationMsgErr    stats.Measurement
 	avroSerializationErr       stats.Measurement
+	batchSize                  stats.Measurement
 }
 
 const (
 	defaultPublishTimeout = 10 * time.Second
+	defaultBatchTimeout   = 1 * time.Second
+	defaultBatchSize      = 100
 )
 
 var (
@@ -170,8 +196,11 @@ var (
 	kafkaDialTimeout                     = 10 * time.Second
 	kafkaReadTimeout                     = 2 * time.Second
 	kafkaWriteTimeout                    = 2 * time.Second
+	kafkaBatchTimeout                    = defaultBatchTimeout
+	kafkaBatchSize                       = defaultBatchSize
 	kafkaBatchingEnabled                 bool
-	allowReqsWithoutUserIDAndAnonymousID bool
+	kafkaCompression                     client.Compression
+	allowReqsWithoutUserIDAndAnonymousID config.ValueLoader[bool]
 
 	kafkaStats managerStats
 	pkgLogger  logger
@@ -195,24 +224,40 @@ func Init() {
 		}
 	}
 
-	config.RegisterDurationConfigVariable(
-		10, &kafkaDialTimeout, false, time.Second,
-		[]string{"Router.kafkaDialTimeout", "Router.kafkaDialTimeoutInSec"}...,
+	kafkaDialTimeout = config.GetDurationVar(10, time.Second, "Router.kafkaDialTimeout", "Router.kafkaDialTimeoutInSec")
+	kafkaReadTimeout = config.GetDurationVar(2, time.Second, "Router.kafkaReadTimeout", "Router.kafkaReadTimeoutInSec")
+	kafkaWriteTimeout = config.GetDurationVar(2, time.Second, "Router.kafkaWriteTimeout", "Router.kafkaWriteTimeoutInSec")
+	kafkaBatchTimeout = config.GetDurationVar(
+		int64(defaultBatchTimeout)/int64(time.Second), time.Second,
+		"Router.kafkaBatchTimeout", "Router.kafkaBatchTimeoutInSec",
 	)
-	config.RegisterDurationConfigVariable(
-		2, &kafkaReadTimeout, false, time.Second,
-		[]string{"Router.kafkaReadTimeout", "Router.kafkaReadTimeoutInSec"}...,
-	)
-	config.RegisterDurationConfigVariable(
-		2, &kafkaWriteTimeout, false, time.Second,
-		[]string{"Router.kafkaWriteTimeout", "Router.kafkaWriteTimeoutInSec"}...,
-	)
-	config.RegisterBoolConfigVariable(false, &kafkaBatchingEnabled, false, "Router.KAFKA.enableBatching")
-	config.RegisterBoolConfigVariable(
-		false, &allowReqsWithoutUserIDAndAnonymousID, true, "Gateway.allowReqsWithoutUserIDAndAnonymousID",
-	)
+	kafkaBatchSize = config.GetIntVar(defaultBatchSize, 1, "Router.kafkaBatchSize")
+	kafkaBatchingEnabled = config.GetBoolVar(false, "Router.KAFKA.enableBatching")
+	allowReqsWithoutUserIDAndAnonymousID = config.GetReloadableBoolVar(false, "Gateway.allowReqsWithoutUserIDAndAnonymousID")
 
 	pkgLogger = rslogger.NewLogger().Child("streammanager").Child("kafka")
+
+	kafkaCompression = client.CompressionNone
+	if kafkaBatchingEnabled {
+		kafkaCompression = client.CompressionZstd
+
+		pkgLogger.Infof("Kafka batching is enabled with batch size: %d and batch timeout: %s",
+			kafkaBatchSize, kafkaBatchTimeout,
+		)
+	}
+	if kc := config.GetInt("Router.kafkaCompression", -1); kc != -1 {
+		switch client.Compression(kc) {
+		case client.CompressionNone,
+			client.CompressionGzip,
+			client.CompressionSnappy,
+			client.CompressionLz4,
+			client.CompressionZstd:
+			kafkaCompression = client.Compression(kc)
+		default:
+			pkgLogger.Errorf("Invalid Kafka compression codec: %d", kc)
+		}
+	}
+
 	kafkaStats = managerStats{
 		creationTime:               stats.Default.NewStat("router.kafka.creation_time", stats.TimerType),
 		creationTimeConfluentCloud: stats.Default.NewStat("router.kafka.creation_time_confluent_cloud", stats.TimerType),
@@ -225,6 +270,7 @@ func Init() {
 		closeProducerTime:          stats.Default.NewStat("router.kafka.close_producer_time", stats.TimerType),
 		jsonSerializationMsgErr:    stats.Default.NewStat("router.kafka.json_serialization_msg_err", stats.CountType),
 		avroSerializationErr:       stats.Default.NewStat("router.kafka.avro_serialization_err", stats.CountType),
+		batchSize:                  stats.Default.NewStat("router.kafka.batch_size", stats.HistogramType),
 	}
 }
 
@@ -269,8 +315,26 @@ func NewProducer(destination *backendconfig.DestinationT, o common.Opts) (*Produ
 		}
 	}
 
+	// TODO: once the latest control-plane changes are in production we can safely remove this
+	sshConfig, err := getSSHConfig(destination.ID, config.Default)
+	if err != nil {
+		return nil, fmt.Errorf("[Kafka] invalid SSH configuration: %w", err)
+	}
+	if sshConfig == nil && destConfig.UseSSH {
+		privateKey, err := getSSHPrivateKey(context.Background(), destination.ID)
+		if err != nil {
+			return nil, fmt.Errorf("[Kafka] invalid SSH private key: %w", err)
+		}
+		sshConfig = &client.SSHConfig{
+			Host:       destConfig.SSHHost + ":" + destConfig.SSHPort,
+			User:       destConfig.SSHUser,
+			PrivateKey: privateKey,
+		}
+	}
+
 	clientConf := client.Config{
 		DialTimeout: kafkaDialTimeout,
+		SSHConfig:   sshConfig,
 	}
 	if destConfig.SslEnabled {
 		if destConfig.CACertificate != "" {
@@ -312,14 +376,21 @@ func NewProducer(destination *backendconfig.DestinationT, o common.Opts) (*Produ
 		return nil, fmt.Errorf("could not ping: %w", err)
 	}
 
-	p, err := c.NewProducer(client.ProducerConfig{
-		ReadTimeout:  kafkaReadTimeout,
-		WriteTimeout: kafkaWriteTimeout,
-	})
+	p, err := c.NewProducer(newProducerConfig())
 	if err != nil {
 		return nil, err
 	}
-	return &ProducerManager{p: p, timeout: o.Timeout, codecs: codecs}, nil
+
+	embedAvroSchemaID := config.GetBool("ROUTER_KAFKA_EMBED_AVRO_SCHEMA_ID_"+strings.ToUpper(destination.ID), false)
+	if !embedAvroSchemaID {
+		embedAvroSchemaID = destConfig.EmbedAvroSchemaID
+	}
+	return &ProducerManager{
+		p:                 p,
+		timeout:           o.Timeout,
+		embedAvroSchemaID: embedAvroSchemaID,
+		codecs:            codecs,
+	}, nil
 }
 
 // NewProducerForAzureEventHubs creates a producer for Azure event hub based on destination config
@@ -363,10 +434,7 @@ func NewProducerForAzureEventHubs(destination *backendconfig.DestinationT, o com
 		return nil, fmt.Errorf("[Azure Event Hubs] Cannot connect: %w", err)
 	}
 
-	p, err := c.NewProducer(client.ProducerConfig{
-		ReadTimeout:  kafkaReadTimeout,
-		WriteTimeout: kafkaWriteTimeout,
-	})
+	p, err := c.NewProducer(newProducerConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -415,10 +483,7 @@ func NewProducerForConfluentCloud(destination *backendconfig.DestinationT, o com
 		return nil, fmt.Errorf("[Confluent Cloud] Cannot connect: %w", err)
 	}
 
-	p, err := c.NewProducer(client.ProducerConfig{
-		ReadTimeout:  kafkaReadTimeout,
-		WriteTimeout: kafkaWriteTimeout,
-	})
+	p, err := c.NewProducer(newProducerConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -438,16 +503,52 @@ func prepareMessage(topic, key string, message []byte, timestamp time.Time) clie
 // It iterates over the schemas provided by the customer and tries to serialize the data.
 // If it's able to serialize the data then it returns the converted data otherwise it returns an error.
 // We are using the LinkedIn goavro library for data serialization. Ref: https://github.com/linkedin/goavro
-func serializeAvroMessage(value []byte, codec goavro.Codec) ([]byte, error) {
+func serializeAvroMessage(schemaID string, embedSchemaID bool, value []byte, codec goavro.Codec) ([]byte, error) {
 	native, _, err := codec.NativeFromTextual(value)
 	if err != nil {
 		return nil, fmt.Errorf("unable convert the event to native from textual, with error: %s", err)
 	}
-	binary, err := codec.BinaryFromNative(nil, native)
+	bin, err := codec.BinaryFromNative(nil, native)
 	if err != nil {
 		return nil, fmt.Errorf("unable convert the event to binary from native, with error: %s", err)
 	}
-	return binary, nil
+
+	if !embedSchemaID {
+		return bin, nil
+	}
+
+	msg, err := addAvroSchemaIDHeader(schemaID, bin)
+	if err != nil {
+		return nil, fmt.Errorf("unable to add Avro schema ID header: %v", err)
+	}
+	return msg, nil
+}
+
+func addAvroSchemaIDHeader(schemaID string, msgBytes []byte) (header []byte, err error) {
+	schemaIDInt, err := strconv.ParseInt(schemaID, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("avro header: unable to convert schemaID %q to int: %v", schemaID, err)
+	}
+
+	var buf bytes.Buffer
+	err = buf.WriteByte(byte(0x0))
+	if err != nil {
+		return nil, fmt.Errorf("avro header: unable to write magic byte: %v", err)
+	}
+
+	idBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(idBytes, uint32(schemaIDInt))
+	_, err = buf.Write(idBytes)
+	if err != nil {
+		return nil, fmt.Errorf("avro header: unable to write schema id: %v", err)
+	}
+
+	_, err = buf.Write(msgBytes)
+	if err != nil {
+		return nil, fmt.Errorf("avro header: unable to write message bytes: %v", err)
+	}
+
+	return buf.Bytes(), nil
 }
 
 func prepareBatchOfMessages(batch []map[string]interface{}, timestamp time.Time, p producerManager, defaultTopic string) (
@@ -455,7 +556,16 @@ func prepareBatchOfMessages(batch []map[string]interface{}, timestamp time.Time,
 ) {
 	start := now()
 	defer func() { kafkaStats.prepareBatchTime.SendTiming(since(start)) }()
+
 	var messages []client.Message
+	var errorSamples []error
+	addErrorSample := func(msg string, args ...any) {
+		err := fmt.Errorf(msg, args...)
+		if len(errorSamples) < 3 {
+			errorSamples = append(errorSamples, err)
+		}
+		pkgLogger.Error(err.Error())
+	}
 
 	for i, data := range batch {
 		topic, ok := data["topic"].(string)
@@ -466,19 +576,19 @@ func prepareBatchOfMessages(batch []map[string]interface{}, timestamp time.Time,
 		message, ok := data["message"]
 		if !ok {
 			kafkaStats.missingMessage.Increment()
-			pkgLogger.Errorf("batch from topic %s is missing the message attribute", topic)
+			addErrorSample("batch from topic %s is missing the message attribute", topic)
 			continue
 		}
 		userID, ok := data["userId"].(string)
-		if !ok && !allowReqsWithoutUserIDAndAnonymousID {
+		if !ok && !allowReqsWithoutUserIDAndAnonymousID.Load() {
 			kafkaStats.missingUserID.Increment()
-			pkgLogger.Errorf("batch from topic %s is missing the userId attribute", topic)
+			addErrorSample("batch from topic %s is missing the userId attribute", topic)
 			continue
 		}
 		marshalledMsg, err := json.Marshal(message)
 		if err != nil {
 			kafkaStats.jsonSerializationMsgErr.Increment()
-			pkgLogger.Errorf("unable to marshal message of index:%d", i)
+			addErrorSample("unable to marshal message at index %d", i)
 			continue
 		}
 		codecs := p.getCodecs()
@@ -486,25 +596,31 @@ func prepareBatchOfMessages(batch []map[string]interface{}, timestamp time.Time,
 			schemaId, _ := data["schemaId"].(string)
 			if schemaId == "" {
 				kafkaStats.avroSerializationErr.Increment()
-				pkgLogger.Errorf("schemaId is not available for the event with index:%d", i)
+				addErrorSample("schemaId is not available for the event at index %d", i)
 				continue
 			}
 			codec, ok := codecs[schemaId]
 			if !ok {
 				kafkaStats.avroSerializationErr.Increment()
-				pkgLogger.Errorf("unable to find schema with schemaId: %v", schemaId)
+				addErrorSample("unable to find schema with schemaId %q", schemaId)
 				continue
 			}
-			marshalledMsg, err = serializeAvroMessage(marshalledMsg, *codec)
+			marshalledMsg, err = serializeAvroMessage(schemaId, p.getEmbedAvroSchemaID(), marshalledMsg, *codec)
 			if err != nil {
 				kafkaStats.avroSerializationErr.Increment()
-				pkgLogger.Errorf("unable to serialize the event of index: %d, with error: %s", i, err)
+				addErrorSample(
+					"unable to serialize the event with schemaId %q at index %d: %s",
+					schemaId, i, err,
+				)
 				continue
 			}
 		}
 		messages = append(messages, prepareMessage(topic, userID, marshalledMsg, timestamp))
 	}
 	if len(messages) == 0 {
+		if len(errorSamples) > 0 {
+			return nil, fmt.Errorf("unable to process any of the event in the batch: some errors are: %v", errorSamples)
+		}
 		return nil, fmt.Errorf("unable to process any of the event in the batch")
 	}
 	return messages, nil
@@ -582,6 +698,8 @@ func sendBatchedMessage(ctx context.Context, jsonData json.RawMessage, p produce
 		return makeErrorResponse(err) // would retry the messages in batch in case brokers are down
 	}
 
+	kafkaStats.batchSize.Observe(float64(len(batchOfMessages)))
+
 	returnMessage := "Kafka: Message delivered in batch"
 	return 200, returnMessage, returnMessage
 }
@@ -609,11 +727,14 @@ func sendMessage(ctx context.Context, jsonData json.RawMessage, p producerManage
 		}
 		codec, ok := codecs[schemaId]
 		if !ok {
-			return makeErrorResponse(fmt.Errorf("unable to find schema with schemaId: %v", schemaId))
+			return makeErrorResponse(fmt.Errorf("unable to find schema with ID %v", schemaId))
 		}
-		value, err = serializeAvroMessage(value, *codec)
+		value, err = serializeAvroMessage(schemaId, p.getEmbedAvroSchemaID(), value, *codec)
 		if err != nil {
-			return makeErrorResponse(fmt.Errorf("unable to serialize event with messageId: %s, with error %s", messageId, err))
+			return makeErrorResponse(fmt.Errorf(
+				"unable to serialize event with schemaId %q and messageId %s: %s",
+				schemaId, messageId, err,
+			))
 		}
 	}
 
@@ -651,4 +772,77 @@ func getStatusCodeFromError(err error) int {
 		return 500
 	}
 	return 400
+}
+
+func newProducerConfig() client.ProducerConfig {
+	pc := client.ProducerConfig{
+		ReadTimeout:  kafkaReadTimeout,
+		WriteTimeout: kafkaWriteTimeout,
+		Compression:  kafkaCompression,
+		Logger:       &client.KafkaLogger{Logger: pkgLogger},
+		ErrorLogger:  &client.KafkaLogger{Logger: pkgLogger, IsErrorLogger: true},
+	}
+	if kafkaBatchingEnabled {
+		pc.BatchTimeout = kafkaBatchTimeout
+		pc.BatchSize = kafkaBatchSize
+	}
+	return pc
+}
+
+// @TODO getSSHConfig should come from control plane (i.e. destination config)
+func getSSHConfig(destinationID string, c *config.Config) (*client.SSHConfig, error) {
+	enabled := c.GetString("ROUTER_KAFKA_SSH_ENABLED", "")
+	if enabled == "" {
+		return nil, nil // nolint
+	}
+
+	var found bool
+	for _, id := range strings.Split(enabled, ",") {
+		if id == destinationID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, nil // nolint
+	}
+
+	privateKey := c.GetString("ROUTER_KAFKA_SSH_PRIVATE_KEY", "")
+	if privateKey == "" {
+		return nil, fmt.Errorf("kafka SSH private key is not set")
+	}
+
+	rawPrivateKey, err := base64.StdEncoding.DecodeString(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 private key: %w", err)
+	}
+
+	return &client.SSHConfig{
+		User:       c.GetString("ROUTER_KAFKA_SSH_USER", ""),
+		Host:       c.GetString("ROUTER_KAFKA_SSH_HOST", ""),
+		PrivateKey: string(rawPrivateKey),
+	}, nil
+}
+
+func getSSHPrivateKey(ctx context.Context, destinationID string) (string, error) {
+	c := controlplane.NewAdminClient(
+		config.GetString("CONFIG_BACKEND_URL", "https://api.rudderstack.com"),
+		&identity.Admin{
+			Username: config.GetString("CP_INTERNAL_API_USERNAME", ""),
+			Password: config.GetString("CP_INTERNAL_API_PASSWORD", ""),
+		},
+	)
+	keyPair, err := c.GetDestinationSSHKeyPair(ctx, destinationID)
+	return keyPair.PrivateKey, err
+}
+
+func isValidPort(p string) error {
+	port, err := strconv.Atoi(p)
+	if err != nil {
+		return err
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port not within valid range 1>=p<=65535: %d", port)
+	}
+	return nil
 }

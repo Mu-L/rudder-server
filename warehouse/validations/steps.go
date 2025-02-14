@@ -1,63 +1,65 @@
 package validations
 
 import (
+	"context"
 	"encoding/json"
 
-	"github.com/rudderlabs/rudder-server/utils/misc"
+	"github.com/samber/lo"
+
+	backendconfig "github.com/rudderlabs/rudder-server/backend-config"
+	schemarepository "github.com/rudderlabs/rudder-server/warehouse/integrations/datalake/schema-repository"
+	"github.com/rudderlabs/rudder-server/warehouse/internal/model"
 	warehouseutils "github.com/rudderlabs/rudder-server/warehouse/utils"
 )
 
-func (ct *CTHandleT) validationStepsFunc(req json.RawMessage, _ string) (json.RawMessage, error) {
-	ct.infoRequest = &DestinationValidationRequest{}
-	if err := parseOptions(req, ct.infoRequest); err != nil {
-		return nil, err
-	}
-
-	return json.Marshal(validationStepsResponse{
-		Steps: ct.validationSteps(),
-	})
+func validateStepFunc(_ context.Context, destination *backendconfig.DestinationT, _ string) (json.RawMessage, error) {
+	return json.Marshal(StepsToValidate(destination))
 }
 
-// validationSteps returns series of validation steps for
-// a particular destination.
-func (ct *CTHandleT) validationSteps() []*validationStep {
-	steps := []*validationStep{{
-		ID:        1,
-		Name:      verifyingObjectStorage,
-		Validator: ct.verifyingObjectStorage,
-	}}
+func StepsToValidate(dest *backendconfig.DestinationT) *model.StepsResponse {
+	destType := dest.DestinationDefinition.Name
 
-	// Time window destination contains only object storage verification
-	if misc.Contains(warehouseutils.TimeWindowDestinations, ct.infoRequest.Destination.DestinationDefinition.Name) {
-		return steps
+	if destType == warehouseutils.SnowpipeStreaming {
+		return &model.StepsResponse{
+			Steps: []*model.Step{
+				{ID: 1, Name: model.VerifyingConnections},
+				{ID: 2, Name: model.VerifyingCreateSchema},
+				{ID: 3, Name: model.VerifyingCreateAndAlterTable},
+				{ID: 4, Name: model.VerifyingFetchSchema},
+			},
+		}
 	}
 
-	steps = append(steps,
-		&validationStep{
-			ID:        2,
-			Name:      verifyingConnections,
-			Validator: ct.verifyingConnections,
-		},
-		&validationStep{
-			ID:        3,
-			Name:      verifyingCreateSchema,
-			Validator: ct.verifyingCreateSchema,
-		},
-		&validationStep{
-			ID:        4,
-			Name:      verifyingCreateAndAlterTable,
-			Validator: ct.verifyingCreateAlterTable,
-		},
-		&validationStep{
-			ID:        5,
-			Name:      verifyingFetchSchema,
-			Validator: ct.verifyingFetchSchema,
-		},
-		&validationStep{
-			ID:        6,
-			Name:      verifyingLoadTable,
-			Validator: ct.verifyingLoadTable,
-		},
-	)
-	return steps
+	steps := []*model.Step{
+		{ID: 1, Name: model.VerifyingObjectStorage},
+	}
+
+	appendSteps := func(newSteps ...string) {
+		for _, step := range newSteps {
+			steps = append(steps, &model.Step{ID: len(steps) + 1, Name: step})
+		}
+	}
+
+	switch destType {
+	case warehouseutils.GCSDatalake, warehouseutils.AzureDatalake:
+		// No additional steps
+	case warehouseutils.S3Datalake:
+		if schemarepository.UseGlue(lo.ToPtr(createDummyWarehouse(dest))) {
+			appendSteps(
+				model.VerifyingCreateSchema,
+				model.VerifyingCreateAndAlterTable,
+				model.VerifyingFetchSchema,
+			)
+		}
+	default:
+		appendSteps(
+			model.VerifyingConnections,
+			model.VerifyingCreateSchema,
+			model.VerifyingCreateAndAlterTable,
+			model.VerifyingFetchSchema,
+			model.VerifyingLoadTable,
+		)
+	}
+
+	return &model.StepsResponse{Steps: steps}
 }
