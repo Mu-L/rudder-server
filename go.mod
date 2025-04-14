@@ -32,7 +32,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.1.3
 	github.com/denisenkom/go-mssqldb v0.12.0
 	github.com/dgraph-io/badger/v2 v2.2007.4
-	github.com/fsnotify/fsnotify v1.5.4
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-redis/redis v6.15.7+incompatible
 	github.com/gofrs/uuid v4.2.0+incompatible
 	github.com/golang-migrate/migrate/v4 v4.15.2
@@ -194,7 +194,7 @@ require (
 	go.uber.org/multierr v1.8.0 // indirect
 	golang.org/x/crypto v0.0.0-20220926161630-eccd6366d1be // indirect
 	golang.org/x/exp v0.0.0-20221109205753-fc8884afc316
-	golang.org/x/sys v0.1.0 // indirect
+	golang.org/x/sys v0.13.0 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
